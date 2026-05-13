@@ -1,0 +1,10 @@
+{
+  "name": "Token Monitor",
+  "short_name": "TokenMonitor",
+  "description": "Monitoraggio token e costi LLM",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0088cc",
+  "icons": []
+}

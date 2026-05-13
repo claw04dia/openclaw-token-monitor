@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Runtime artifacts produced by the build pipeline
+outputs/
+data/
+
+# Local test fixtures + transient caches
+.cache/
+*.bak
+*.log
+
+# Editor state
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1c1c1e">
+  <title>Token Monitor</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+</head>
+<body>
+  <header id="header">
+    <div class="header-left">
+      <span class="header-icon">📊</span>
+      <h1 class="header-title">Token Monitor</h1>
+    </div>
+    <button id="refreshBtn" class="header-action" aria-label="Aggiorna">↻</button>
+  </header>
+
+  <main>
+    <!-- ─────────── DASHBOARD ─────────── -->
+    <section id="section-dashboard" class="section active">
+
+      <!-- Budget card -->
+      <div class="card budget-card">
+        <div class="budget-head">
+          <span class="muted" id="todayDate">—</span>
+          <span class="muted" id="updatedAgo">—</span>
+        </div>
+        <div class="budget-main">
+          <span class="budget-cost" id="todayCost">—</span>
+          <span class="budget-of muted">/</span>
+          <span class="budget-budget" id="dailyBudget">—</span>
+        </div>
+        <div class="budget-bar">
+          <div class="budget-fill" id="budgetFill"></div>
+        </div>
+        <div class="budget-foot muted">
+          <span id="todayPct">—</span>
+          <span id="todayTokens">—</span>
+        </div>
+      </div>
+
+      <!-- Stats trio (real OpenRouter numbers) -->
+      <div class="stats-trio">
+        <div class="stat">
+          <span class="stat-label">7 giorni</span>
+          <span class="stat-value" id="week-cost">—</span>
+          <span class="stat-sub muted">OpenRouter</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Mese</span>
+          <span class="stat-value" id="month-cost">—</span>
+          <span class="stat-sub muted">OpenRouter</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Lifetime</span>
+          <span class="stat-value" id="all-cost">—</span>
+          <span class="stat-sub muted" id="all-sub">OpenRouter</span>
+        </div>
+      </div>
+
+      <!-- Agent breakdown -->
+      <div class="card">
+        <div class="card-title">
+          <span class="card-icon">👥</span>
+          Chi spende <span class="card-hint muted">dati reali per agente</span>
+        </div>
+        <div id="agentBars" class="agent-bars">
+          <div class="empty muted">Caricamento…</div>
+        </div>
+      </div>
+
+      <!-- Bloated sessions -->
+      <div class="card">
+        <div class="card-title">
+          <span class="card-icon">🔥</span>
+          Top sessioni
+          <span class="card-hint muted">per costo reale</span>
+        </div>
+        <div id="bloatList" class="bloat-list">
+          <div class="empty muted">Caricamento…</div>
+        </div>
+      </div>
+
+      <!-- Daily trend -->
+      <div class="card">
+        <div class="card-title">
+          <span class="card-icon">📈</span>
+          Spesa giornaliera
+          <span class="card-hint muted">14 giorni · dati reali</span>
+        </div>
+        <div id="trendChart" class="trend-chart">
+          <div class="empty muted">Caricamento…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────── LIVE ─────────── -->
+    <section id="section-live" class="section">
+      <div id="liveList" class="live-list">
+        <div class="empty muted">Caricamento…</div>
+      </div>
+    </section>
+
+    <!-- ─────────── SESSIONI ─────────── -->
+    <section id="section-sessions" class="section">
+      <div class="sessions-toolbar">
+        <input id="sessionsFilter" type="search" placeholder="🔎 Filtra topic, agente, modello…">
+        <div id="sessionsCount" class="sessions-count muted">—</div>
+      </div>
+      <div id="sessionsList" class="sessions-list">
+        <div class="empty muted">Caricamento…</div>
+      </div>
+    </section>
+
+    <!-- ─────────── PREZZI ─────────── -->
+    <section id="section-prices" class="section">
+      <div class="card">
+        <div class="card-title">
+          <span class="card-icon">🏷</span>
+          Listino prezzi
+          <span class="card-hint muted">$/M token</span>
+        </div>
+        <div id="pricesList" class="prices-list">
+          <div class="empty muted">Caricamento…</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <nav id="nav">
+    <button class="nav-link active" data-section="dashboard">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">Dashboard</span>
+    </button>
+    <button class="nav-link" data-section="live">
+      <span class="nav-icon">⚡</span>
+      <span class="nav-label">Live</span>
+    </button>
+    <button class="nav-link" data-section="sessions">
+      <span class="nav-icon">📋</span>
+      <span class="nav-label">Sessioni</span>
+    </button>
+    <button class="nav-link" data-section="prices">
+      <span class="nav-icon">🏷</span>
+      <span class="nav-label">Prezzi</span>
+    </button>
+  </nav>
+
+  <script src="js/db.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/live.js"></script>
+  <script src="js/sessions.js"></script>
+  <script src="js/prices.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
