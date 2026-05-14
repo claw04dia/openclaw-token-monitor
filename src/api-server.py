@@ -38,6 +38,7 @@ ALLOW_ORIGIN = os.environ.get("ALLOW_ORIGIN", "*")
 HISTORY_PATH = "/tmp/claw04-telegram-miniapp/history.json"
 TOKEN_USAGE_PATH = os.path.expanduser("~/.openclaw/workspace/memory/token-usage.json")
 AUTH_PROFILES_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
+CRON_JOBS_PATH = os.path.expanduser("~/.openclaw/cron/jobs.json")
 SESSIONS_CACHE = Path.home() / ".cache" / "token-monitor" / "sessions.json"
 BUILD_SESSIONS_SCRIPT = Path(__file__).resolve().parent.parent / "build-sessions.py"
 SESSIONS_TTL = 300         # forced rebuild every 5 min even if nothing changed
@@ -244,6 +245,133 @@ def build_payload() -> dict:
     return data
 
 
+_CRON_SHORTCUTS = {
+    "@reboot":   None,
+    "@yearly":   "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+    "@monthly":  "0 0 1 * *",
+    "@weekly":   "0 0 * * 0",
+    "@daily":    "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly":   "0 * * * *",
+}
+
+
+def _parse_crontab_line(line: str) -> dict | None:
+    """Parse a single crontab entry. Returns None for blanks/comments/env vars."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    # env var: NAME=value (no schedule field starting at column 0)
+    if "=" in s.split()[0] and not s[0] in "@*0123456789":
+        return None
+    parts = s.split(None, 5)
+    if not parts:
+        return None
+    if parts[0].startswith("@"):
+        if len(parts) < 2:
+            return None
+        return {
+            "expr": parts[0],
+            "exprStandard": _CRON_SHORTCUTS.get(parts[0]),
+            "command": " ".join(parts[1:]),
+        }
+    if len(parts) < 6:
+        return None
+    expr = " ".join(parts[:5])
+    return {"expr": expr, "exprStandard": expr, "command": parts[5]}
+
+
+def build_cron_payload() -> dict:
+    """Read ~/.openclaw/cron/jobs.json and return a slim, UI-friendly shape.
+
+    The raw payload.message can be huge (kilobytes of Italian briefing prompts);
+    we forward it untouched so the mini-app can show it on demand, but include
+    a short preview so the list renders fast.
+    """
+    out: dict = {"jobs": [], "updatedAt": None, "path": CRON_JOBS_PATH}
+    try:
+        st = os.stat(CRON_JOBS_PATH)
+        out["updatedAt"] = int(st.st_mtime)
+        with open(CRON_JOBS_PATH) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        out["error"] = "cron jobs.json non trovato"
+        return out
+    except Exception as e:
+        out["error"] = f"jobs.json: {e}"
+        return out
+
+    for j in raw.get("jobs", []) or []:
+        sched = j.get("schedule") or {}
+        payload = j.get("payload") or {}
+        delivery = j.get("delivery") or {}
+        msg = payload.get("message") or ""
+        preview = msg.strip().split("\n", 1)[0][:160]
+        out["jobs"].append({
+            "id": j.get("id"),
+            "name": j.get("name"),
+            "description": j.get("description") or "",
+            "enabled": bool(j.get("enabled", True)),
+            "createdAtMs": j.get("createdAtMs"),
+            "schedule": {
+                "kind": sched.get("kind"),
+                "expr": sched.get("expr"),
+                "tz": sched.get("tz") or "UTC",
+            },
+            "sessionTarget": j.get("sessionTarget"),
+            "wakeMode": j.get("wakeMode"),
+            "payload": {
+                "kind": payload.get("kind"),
+                "thinking": payload.get("thinking"),
+                "model": payload.get("model"),
+                "toolsAllow": payload.get("toolsAllow") or [],
+                "messagePreview": preview,
+                "messageLength": len(msg),
+                "message": msg,
+            },
+            "delivery": {
+                "mode": delivery.get("mode"),
+                "channel": delivery.get("channel"),
+                "to": delivery.get("to"),
+            },
+        })
+    return out
+
+
+def build_system_cron_payload() -> dict:
+    """Return parsed entries from the user's crontab (`crontab -l`).
+
+    OS-level drop-ins (/etc/cron.d, /etc/cron.daily/...) are intentionally
+    excluded — they're apt/sysstat/logrotate boilerplate, not user-relevant.
+    """
+    import subprocess
+    out: dict = {"entries": [], "source": "crontab -l"}
+    try:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
+    except FileNotFoundError:
+        out["error"] = "crontab non disponibile"
+        return out
+    except Exception as e:
+        out["error"] = f"crontab error: {e}"
+        return out
+    if r.returncode != 0:
+        # No crontab installed is a normal state — exit code 1 with "no crontab for X"
+        msg = (r.stderr or "").strip().lower()
+        if "no crontab" in msg:
+            return out
+        out["error"] = f"crontab rc={r.returncode}: {r.stderr.strip()}"
+        return out
+    for idx, line in enumerate(r.stdout.splitlines(), start=1):
+        parsed = _parse_crontab_line(line)
+        if not parsed:
+            continue
+        parsed["line"] = idx
+        parsed["raw"] = line
+        out["entries"].append(parsed)
+    return out
+
+
 # ─────────────────────────── HTTP handler ───────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -333,6 +461,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             payload["user"] = {"id": user.get("id"), "first_name": user.get("first_name")}
             self._json(200, payload)
+            return
+        if path == "/api/cron":
+            user = self._auth()
+            if not user:
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                self._json(200, build_cron_payload())
+            except Exception as e:
+                log.exception("cron payload build failed")
+                self._json(500, {"error": "internal", "detail": str(e)})
+            return
+        if path == "/api/system-cron":
+            user = self._auth()
+            if not user:
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                self._json(200, build_system_cron_payload())
+            except Exception as e:
+                log.exception("system cron payload build failed")
+                self._json(500, {"error": "internal", "detail": str(e)})
             return
         # Static frontend
         if path in STATIC_FILES or path.startswith(STATIC_DIRS):

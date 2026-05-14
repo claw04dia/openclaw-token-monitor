@@ -44,6 +44,7 @@
     if (section === "dashboard") renderDashboard();
     if (section === "live") renderLive();
     if (section === "sessions") renderSessions();
+    if (section === "cron") renderCron();
     if (section === "prices") renderPrices();
     _currentSection = section;
     if (section === "live") { pollLiveOnce(); startLivePolling(); }
@@ -80,6 +81,7 @@
     renderDashboard();
     renderLive();
     renderSessions();
+    renderCron(true);
     renderPrices();
   }
   document.getElementById("refreshBtn").addEventListener("click", refresh);

@@ -116,6 +116,33 @@
       </div>
     </section>
 
+    <!-- ─────────── CRON ─────────── -->
+    <section id="section-cron" class="section">
+      <div class="cron-section-title">
+        <span class="card-icon">🤖</span>
+        Agenti OpenClaw <span class="muted">jobs.json</span>
+      </div>
+      <div class="cron-toolbar">
+        <div id="cronCount" class="muted">—</div>
+        <div id="cronUpdated" class="muted">—</div>
+      </div>
+      <div id="cronList" class="cron-list">
+        <div class="empty muted">Caricamento…</div>
+      </div>
+
+      <div class="cron-section-title" style="margin-top:18px">
+        <span class="card-icon">⚙️</span>
+        Sistema <span class="muted">crontab utente</span>
+      </div>
+      <div class="cron-toolbar">
+        <div id="sysCronCount" class="muted">—</div>
+        <div id="sysCronSource" class="muted">—</div>
+      </div>
+      <div id="sysCronList" class="cron-list">
+        <div class="empty muted">Caricamento…</div>
+      </div>
+    </section>
+
     <!-- ─────────── PREZZI ─────────── -->
     <section id="section-prices" class="section">
       <div class="card">
@@ -144,6 +171,10 @@
       <span class="nav-icon">📋</span>
       <span class="nav-label">Sessioni</span>
     </button>
+    <button class="nav-link" data-section="cron">
+      <span class="nav-icon">⏰</span>
+      <span class="nav-label">Cron</span>
+    </button>
     <button class="nav-link" data-section="prices">
       <span class="nav-icon">🏷</span>
       <span class="nav-label">Prezzi</span>
@@ -154,6 +185,7 @@
   <script src="js/dashboard.js"></script>
   <script src="js/live.js"></script>
   <script src="js/sessions.js"></script>
+  <script src="js/cron.js"></script>
   <script src="js/prices.js"></script>
   <script src="js/app.js"></script>
 </body>
