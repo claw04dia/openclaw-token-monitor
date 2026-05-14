@@ -66,6 +66,9 @@ function getData() { return Store.data || {}; }
 function getError() { return Store.error; }
 function getApiBase() { return API_BASE; }
 function getLoadedAt() { return Store.loadedAt; }
+function getViewer() { return (Store.data && Store.data.viewer) || null; }
+function isAdmin() { return !!(Store.data && Store.data.viewer && Store.data.viewer.isAdmin); }
+function isViewerScope() { return !!(Store.data && Store.data.scope === "viewer"); }
 
 function escHtml(s) {
   const d = document.createElement("div");

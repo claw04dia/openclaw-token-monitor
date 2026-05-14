@@ -15,6 +15,7 @@
     <div class="header-left">
       <span class="header-icon">📊</span>
       <h1 class="header-title">Token Monitor</h1>
+      <span id="viewerBadge" class="viewer-badge" hidden></span>
     </div>
     <button id="refreshBtn" class="header-action" aria-label="Aggiorna">↻</button>
   </header>
@@ -98,15 +99,9 @@
       </div>
     </section>
 
-    <!-- ─────────── LIVE ─────────── -->
-    <section id="section-live" class="section">
-      <div id="liveList" class="live-list">
-        <div class="empty muted">Caricamento…</div>
-      </div>
-    </section>
-
-    <!-- ─────────── SESSIONI ─────────── -->
+    <!-- ─────────── SESSIONI (incl. Live) ─────────── -->
     <section id="section-sessions" class="section">
+      <div id="liveGroup" class="live-list" hidden></div>
       <div class="sessions-toolbar">
         <input id="sessionsFilter" type="search" placeholder="🔎 Filtra topic, agente, modello…">
         <div id="sessionsCount" class="sessions-count muted">—</div>
@@ -163,12 +158,8 @@
       <span class="nav-icon">📊</span>
       <span class="nav-label">Dashboard</span>
     </button>
-    <button class="nav-link" data-section="live">
-      <span class="nav-icon">⚡</span>
-      <span class="nav-label">Live</span>
-    </button>
     <button class="nav-link" data-section="sessions">
-      <span class="nav-icon">📋</span>
+      <span class="nav-icon">⚡</span>
       <span class="nav-label">Sessioni</span>
     </button>
     <button class="nav-link" data-section="cron">

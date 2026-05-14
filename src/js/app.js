@@ -7,6 +7,37 @@
     tg.expand();
   }
 
+  const VIEWER_HTML = `
+    <div class="card viewer-card">
+      <div class="card-title"><span class="card-icon">🔒</span> Accesso limitato</div>
+      <p>Sei autenticato come <b id="viewerName">viewer</b>. Solo gli admin
+      vedono sessioni, costi e cron. Contatta l'amministratore per accedere.</p>
+    </div>`;
+
+  function updateViewerBadge() {
+    const v = getViewer();
+    const el = document.getElementById("viewerBadge");
+    if (!el) return;
+    if (!v) { el.hidden = true; return; }
+    const name = v.firstName || v.username || ("#" + v.id);
+    el.hidden = false;
+    el.classList.toggle("admin", !!v.isAdmin);
+    el.classList.toggle("viewer", !v.isAdmin);
+    el.textContent = (v.isAdmin ? "👑 " : "👤 ") + name;
+  }
+
+  function paintViewerScope() {
+    if (!isViewerScope()) return false;
+    const v = getViewer() || {};
+    ["dashboard", "sessions", "cron", "prices"].forEach(s => {
+      const sec = document.getElementById("section-" + s);
+      if (sec) sec.innerHTML = VIEWER_HTML;
+    });
+    const nameEl = document.getElementById("viewerName");
+    if (nameEl) nameEl.textContent = v.firstName || v.username || ("#" + v.id);
+    return true;
+  }
+
   const LIVE_POLL_MS = 10000;
   let _livePollTimer = null;
   let _currentSection = null;
@@ -14,7 +45,7 @@
   async function pollLiveOnce() {
     if (document.hidden) return;
     const data = await loadData(true);
-    if (data) renderLive();
+    if (data) renderSessions();
   }
 
   function startLivePolling() {
@@ -29,7 +60,7 @@
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (_currentSection !== "live") return;
+    if (_currentSection !== "sessions") return;
     if (document.hidden) stopLivePolling();
     else { startLivePolling(); pollLiveOnce(); }
   });
@@ -41,13 +72,18 @@
     if (target) target.classList.add("active");
     const link = document.querySelector(`.nav-link[data-section="${section}"]`);
     if (link) link.classList.add("active");
+    if (paintViewerScope()) {
+      _currentSection = section;
+      stopLivePolling();
+      window.scrollTo(0, 0);
+      return;
+    }
     if (section === "dashboard") renderDashboard();
-    if (section === "live") renderLive();
     if (section === "sessions") renderSessions();
     if (section === "cron") renderCron();
     if (section === "prices") renderPrices();
     _currentSection = section;
-    if (section === "live") { pollLiveOnce(); startLivePolling(); }
+    if (section === "sessions") { pollLiveOnce(); startLivePolling(); }
     else stopLivePolling();
     window.scrollTo(0, 0);
   }
@@ -78,8 +114,9 @@
       setTimeout(() => (btn.textContent = "↻"), 1500);
       return;
     }
+    updateViewerBadge();
+    if (paintViewerScope()) return;
     renderDashboard();
-    renderLive();
     renderSessions();
     renderCron(true);
     renderPrices();
@@ -89,5 +126,6 @@
   // Initial load
   const data = await loadData(true);
   if (!data) showError("⚠ " + (getError() || "Impossibile caricare i dati"));
+  updateViewerBadge();
   navigate("dashboard");
 })();

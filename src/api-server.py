@@ -30,6 +30,14 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USERS = {
     int(x) for x in os.environ.get("TELEGRAM_ALLOWED_USER", "529895213").split(",") if x.strip()
 }
+# Admin users see full data; allowed-but-non-admin get viewer scope (no data).
+# Defaults to ALLOWED_USERS so existing single-user deployments stay admin.
+ADMIN_USERS = {
+    int(x) for x in os.environ.get(
+        "TELEGRAM_ADMIN_USER",
+        os.environ.get("TELEGRAM_ALLOWED_USER", "529895213"),
+    ).split(",") if x.strip()
+}
 PORT = int(os.environ.get("PORT", "8899"))
 BIND = os.environ.get("BIND", "127.0.0.1")
 MAX_AGE = int(os.environ.get("AUTH_MAX_AGE_SECONDS", "86400"))
@@ -392,6 +400,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _viewer(self, user: dict) -> dict:
+        return {
+            "id": user.get("id"),
+            "firstName": user.get("first_name"),
+            "username": user.get("username"),
+            "isAdmin": user.get("id") in ADMIN_USERS,
+        }
+
     def _auth(self) -> dict | None:
         header = self.headers.get("Authorization", "")
         init_data = ""
@@ -438,7 +454,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        # Telegram in-app webview caches aggressively; no-store guarantees a
+        # refetch each time the user opens the mini-app.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self._cors()
         self.end_headers()
         self.wfile.write(body)
@@ -453,13 +473,18 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 self._json(401, {"error": "unauthorized"})
                 return
+            viewer = self._viewer(user)
+            if not viewer["isAdmin"]:
+                self._json(200, {"viewer": viewer, "scope": "viewer"})
+                return
             try:
                 payload = build_payload()
             except Exception as e:
                 log.exception("payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
                 return
-            payload["user"] = {"id": user.get("id"), "first_name": user.get("first_name")}
+            payload["viewer"] = viewer
+            payload["scope"] = "admin"
             self._json(200, payload)
             return
         if path == "/api/cron":
@@ -467,8 +492,15 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 self._json(401, {"error": "unauthorized"})
                 return
+            viewer = self._viewer(user)
+            if not viewer["isAdmin"]:
+                self._json(200, {"viewer": viewer, "scope": "viewer"})
+                return
             try:
-                self._json(200, build_cron_payload())
+                payload = build_cron_payload()
+                payload["viewer"] = viewer
+                payload["scope"] = "admin"
+                self._json(200, payload)
             except Exception as e:
                 log.exception("cron payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
@@ -478,8 +510,15 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 self._json(401, {"error": "unauthorized"})
                 return
+            viewer = self._viewer(user)
+            if not viewer["isAdmin"]:
+                self._json(200, {"viewer": viewer, "scope": "viewer"})
+                return
             try:
-                self._json(200, build_system_cron_payload())
+                payload = build_system_cron_payload()
+                payload["viewer"] = viewer
+                payload["scope"] = "admin"
+                self._json(200, payload)
             except Exception as e:
                 log.exception("system cron payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
@@ -498,7 +537,8 @@ def main():
         raise SystemExit("TELEGRAM_BOT_TOKEN env var required")
     if not ALLOWED_USERS:
         raise SystemExit("TELEGRAM_ALLOWED_USER env var required")
-    log.info("listening on %s:%d (allowed users=%s)", BIND, PORT, sorted(ALLOWED_USERS))
+    log.info("listening on %s:%d (allowed=%s, admin=%s)",
+             BIND, PORT, sorted(ALLOWED_USERS), sorted(ADMIN_USERS))
     HTTPServer((BIND, PORT), Handler).serve_forever()
 
 

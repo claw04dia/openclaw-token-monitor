@@ -1,55 +1,20 @@
-/* live.js — current session of each main agent + subagents spawned in it. */
+/* live.js — live card builder. The DOM rendering lives in sessions.js now;
+ * this file just exports the card builders used at the top of the Sessions tab. */
 
 const _openAgents = new Set();
 const _openSubs = new Set();
 let _liveInitialized = false;
 
-function renderLive() {
-  const d = getData();
-  const agents = d.currentByAgent || [];
-  const wrap = document.getElementById("liveList");
+function toggleLiveAgent(agent) {
+  if (!_liveInitialized) { _liveInitialized = true; }
+  if (_openAgents.has(agent)) _openAgents.delete(agent);
+  else _openAgents.add(agent);
+}
 
-  const loadedAt = (typeof getLoadedAt === "function") ? getLoadedAt() : Date.now();
-  const ageSec = Math.max(0, Math.floor((Date.now() - loadedAt) / 1000));
-  const ageLabel = ageSec < 2 ? "aggiornato ora" : `aggiornato ${ageSec}s fa`;
-  const statusBar = `
-    <div class="live-status">
-      <span class="live-dot"></span>
-      <span class="live-status-label">live</span>
-      <span class="live-status-ago muted" id="liveUpdatedAt">${ageLabel}</span>
-    </div>`;
-
-  if (!agents.length) {
-    wrap.innerHTML = statusBar + '<div class="empty muted">Nessuna sessione recente</div>';
-    return;
-  }
-
-  if (!_liveInitialized) {
-    _openAgents.add(agents[0].agent);
-    _liveInitialized = true;
-  }
-
-  wrap.innerHTML = statusBar + agents.map(s => agentLiveCard(s)).join("");
-
-  if (!wrap.dataset.bound) {
-    wrap.dataset.bound = "1";
-    wrap.addEventListener("click", (e) => {
-      const btnSub = e.target.closest("[data-toggle-sub]");
-      if (btnSub) {
-        const k = btnSub.dataset.toggleSub;
-        if (_openSubs.has(k)) _openSubs.delete(k);
-        else _openSubs.add(k);
-        renderLive();
-        return;
-      }
-      const btn = e.target.closest("[data-toggle-agent]");
-      if (!btn) return;
-      const a = btn.dataset.toggleAgent;
-      if (_openAgents.has(a)) _openAgents.delete(a);
-      else _openAgents.add(a);
-      renderLive();
-    });
-  }
+function ensureLiveDefaultOpen(firstAgent) {
+  if (_liveInitialized || !firstAgent) return;
+  _openAgents.add(firstAgent);
+  _liveInitialized = true;
 }
 
 function fmtAgo2(iso) {
@@ -91,10 +56,29 @@ function ctxGauge(used, win) {
     </div>`;
 }
 
+function ownerChip(owner, opts) {
+  if (!owner || !owner.ownerLabel) return "";
+  opts = opts || {};
+  const viewer = (typeof getViewer === "function") ? getViewer() : null;
+  const isMe = viewer && String(viewer.id) === String(owner.ownerKey);
+  const big = opts.big ? " big" : "";
+  const cls = "owner-chip owner-" + (owner.ownerKind || "unknown") + (isMe ? " is-me" : "") + big;
+  let label;
+  if (isMe) {
+    label = `✨ Tu (${owner.ownerKey})`;
+  } else if (owner.ownerKind === "telegram") {
+    label = `👤 utente ${owner.ownerKey}`;
+  } else {
+    label = owner.ownerLabel;
+  }
+  return `<span class="${cls}" title="${escHtml(owner.ownerKey || "")}">${escHtml(label)}</span>`;
+}
+
 function agentLiveCard(s) {
-  const open = _openAgents.has(s.agent);
-  // peakSingleCall = max (input + cacheRead) of any single API call.
-  // That's what OpenClaw's /context shows: "how full the prompt window got".
+  // Live cards are keyed by sessionId (not agent) so two users on the same
+  // agent expand independently.
+  const key = s.sessionId || s.sessionKey || s.agent;
+  const open = _openAgents.has(key);
   const used = s.peakSingleCall || 0;
   const win = s.contextWindow || 0;
 
@@ -103,9 +87,18 @@ function agentLiveCard(s) {
   const totalCost = s.totalCost ?? (parentCost + subCost);
   const subCount = (s.subagents || []).length;
 
+  const isMine = (() => {
+    const v = (typeof getViewer === "function") ? getViewer() : null;
+    return v && s.owner && String(v.id) === String(s.owner.ownerKey);
+  })();
+
   return `
-    <div class="live-card ${open ? "open" : ""}">
-      <button class="live-head" data-toggle-agent="${escHtml(s.agent)}" aria-expanded="${open}">
+    <div class="live-card ${open ? "open" : ""} ${isMine ? "mine" : "other"}" data-sid="${escHtml(key)}">
+      <div class="live-owner-banner">
+        ${ownerChip(s.owner, {big: true})}
+        <span class="live-owner-meta muted">${escHtml(s.sessionId || "").slice(0, 8)}</span>
+      </div>
+      <button class="live-head" data-toggle-agent="${escHtml(key)}" aria-expanded="${open}">
         <span class="agent-dot agent-${escHtml(s.agent)}"></span>
         <div class="live-titles">
           <span class="live-agent">${escHtml(s.agent)}</span>

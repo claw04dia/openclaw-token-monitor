@@ -530,6 +530,70 @@ def build() -> dict:
         if not existing or (s.get("ended") or "") > (existing.get("ended") or ""):
             sessions_by_key[sk] = s
 
+    # Reverse map: child sessionKey → parent sessionKey, built from spawnLinks
+    # captured on each parent's trajectory. Used to attribute subagents to a
+    # specific main session in the flat records list.
+    child_to_parent_key: dict[str, str] = {}
+    spawn_link_by_child: dict[str, dict] = {}
+    raw_by_key: dict[str, dict] = {}
+    for r_s in raw:
+        rk = r_s.get("sessionKey") or ""
+        if rk:
+            raw_by_key[rk] = r_s
+        for link in (r_s.get("spawnLinks") or []):
+            ck = link.get("childSessionKey") or ""
+            if ck and ck not in child_to_parent_key:
+                child_to_parent_key[ck] = rk
+                spawn_link_by_child[ck] = link
+
+    def _session_kind(sk: str) -> str:
+        if ":subagent:" in sk:
+            return "subagent"
+        if ":cron:" in sk:
+            return "cron"
+        return "main"
+
+    def _extract_owner(sk: str) -> dict:
+        """Pull owner info from sessionKey suffix. Formats observed:
+        - agent:<a>:telegram:direct:<chatId>
+        - agent:<a>:telegram:group:<chatId>
+        - agent:<a>:cli:<...>
+        - agent:<a>:subagent:<uuid>   (owner = the parent's session)
+        - agent:<a>:cron:<id>          (owner = cron)
+        """
+        parts = sk.split(":")
+        if len(parts) >= 5 and parts[2] == "telegram":
+            chat_id = parts[4]
+            return {
+                "ownerKey": chat_id,
+                "ownerKind": "telegram",
+                "ownerLabel": f"📨 {chat_id}",
+                "ownerChannel": parts[3],
+            }
+        if len(parts) >= 3 and parts[2] == "cli":
+            return {"ownerKey": "cli", "ownerKind": "cli", "ownerLabel": "💻 CLI"}
+        if len(parts) >= 3 and parts[2] == "cron":
+            return {"ownerKey": "cron", "ownerKind": "cron", "ownerLabel": "⏰ cron"}
+        if len(parts) >= 3 and parts[2] == "subagent":
+            return {"ownerKey": "subagent", "ownerKind": "subagent", "ownerLabel": "↳ subagent"}
+        return {"ownerKey": "?", "ownerKind": "unknown", "ownerLabel": "?"}
+
+    def _agent_from_session_key(sk: str) -> str | None:
+        # sessionKey like agent:<owner_agent>:<scope>:<id> — parts[1] is the
+        # agent that OWNS this session, not the spawner. For subagents we look
+        # up the actual parent via the spawn-link map below.
+        parts = sk.split(":")
+        if len(parts) >= 2 and parts[0] == "agent":
+            return parts[1]
+        return None
+
+    def _parent_for_subagent(sk: str) -> tuple[str | None, str | None]:
+        """Return (parent_session_key, parent_agent) by following the spawn map."""
+        parent_key = child_to_parent_key.get(sk)
+        if not parent_key:
+            return None, None
+        return parent_key, _agent_from_session_key(parent_key)
+
     # Build session records — cost summed across per-model chunks
     records = []
     for s in subs:
@@ -543,6 +607,12 @@ def build() -> dict:
         # Date attribution: use ENDED date so a session straddling midnight
         # lands on the day where the bulk of the work actually happened
         # (matches user perception of "what I spent today").
+        sk = s.get("sessionKey") or ""
+        kind = _session_kind(sk)
+        if kind == "subagent":
+            parent_key, parent_agent = _parent_for_subagent(sk)
+        else:
+            parent_key, parent_agent = None, None
         records.append({
             "id": os.path.basename(s["path"]).split(".")[0],
             "agent": s["agent"],
@@ -562,6 +632,11 @@ def build() -> dict:
             "totalTokens": tin + tout,
             "cost": round(c, 6),
             "topic": extract_topic(s),
+            "sessionKey": sk,
+            "kind": kind,
+            "parentAgent": parent_agent,
+            "parentSessionKey": parent_key,
+            "owner": _extract_owner(sk),
         })
 
     # Sort newest first by actual completion time (endedAt), not by start time.
@@ -617,13 +692,6 @@ def build() -> dict:
     # "Live" view: only the current session of each *main* agent — sessions
     # whose sessionKey is neither a subagent nor a cron run. The subagents
     # that the main session spawned are nested inside as `subagents: [...]`.
-    def _session_kind(sk: str) -> str:
-        if ":subagent:" in sk:
-            return "subagent"
-        if ":cron:" in sk:
-            return "cron"
-        return "main"
-
     def _subagent_card(child: dict, link: dict) -> dict:
         """Build a compact card for a child session referenced by a spawn link."""
         mins = duration_minutes(child["started"], child["ended"])
@@ -655,29 +723,34 @@ def build() -> dict:
             "status": link.get("status", ""),
         }
 
-    # Pick the latest *main* session per agent (one card per agent), and only
-    # include it if it ended within the last 48h — otherwise it's not really
-    # "current" and just adds noise (e.g. an old direct-mode session for an
-    # agent that's been demoted to subagent-only).
-    LIVE_CUTOFF_HOURS = 48
-    cutoff_iso = (datetime.now(timezone.utc).timestamp() - LIVE_CUTOFF_HOURS * 3600)
+    # Live sessions: every *main* session whose last event landed within
+    # LIVE_CUTOFF_MINUTES. We do NOT deduplicate by agent — two users chatting
+    # to the same agent (e.g. `main` via two different Telegram chats) must
+    # appear as two separate live cards, each with its own owner chip.
+    # 4h window: long enough to span a single working session with pauses,
+    # short enough to exclude yesterday's traffic.
+    LIVE_CUTOFF_MINUTES = 240
+    cutoff_iso = (datetime.now(timezone.utc).timestamp() - LIVE_CUTOFF_MINUTES * 60)
+
     def _ts_to_epoch(iso: str) -> float:
         try:
             return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
         except Exception:
             return 0.0
-    latest_main_by_agent: dict[str, dict] = {}
+
+    live_mains: list[dict] = []
     for s in subs:
         if _session_kind(s.get("sessionKey") or "") != "main":
             continue
         if _ts_to_epoch(s.get("ended") or "") < cutoff_iso:
             continue
-        existing = latest_main_by_agent.get(s["agent"])
-        if not existing or s["started"] > existing["started"]:
-            latest_main_by_agent[s["agent"]] = s
+        live_mains.append(s)
+    # Most recently active first
+    live_mains.sort(key=lambda s: s.get("ended") or "", reverse=True)
 
     current_by_agent = []
-    for agent, s in latest_main_by_agent.items():
+    for s in live_mains:
+        agent = s["agent"]
         mins = duration_minutes(s["started"], s["ended"])
         # Cost
         c = sum(cost_for(m, u) for m, u in (s.get("perModelUsage") or {}).items())
@@ -742,10 +815,12 @@ def build() -> dict:
         sub_cache = sum(sc.get("cacheRead", 0) or 0 for sc in sub_cards)
         sub_turns = sum(sc.get("turns", 0) or 0 for sc in sub_cards)
 
+        owner = _extract_owner(s.get("sessionKey") or "")
         current_by_agent.append({
             "agent": agent,
             "sessionId": os.path.basename(s["path"]).split(".")[0],
             "sessionKey": s.get("sessionKey") or "",
+            "owner": owner,
             "model": s["model"],
             "modelDisplay": MODEL_DISPLAY.get(s["model"], s["model"]),
             "contextWindow": ctx_window,
@@ -775,8 +850,56 @@ def build() -> dict:
             "subagents": sub_cards,
         })
 
-    # Sort: most recent first
-    current_by_agent.sort(key=lambda x: x["started"], reverse=True)
+    # Sort: most recently active first (by last event timestamp).
+    current_by_agent.sort(key=lambda x: x.get("ended") or "", reverse=True)
+
+    # Attach subagent cards to every MAIN session record (not just live ones)
+    # so the Sessions tab can nest children under their parent. Reuses the same
+    # spawn-link resolution path as currentByAgent.
+    live_session_ids = {c["sessionId"] for c in current_by_agent if c.get("sessionId")}
+    for r in records:
+        r["isLive"] = r["id"] in live_session_ids
+        if r.get("kind") != "main":
+            r["subagents"] = []
+            continue
+        parent_raw = raw_by_key.get(r.get("sessionKey") or "")
+        if not parent_raw:
+            r["subagents"] = []
+            continue
+        sub_cards: list[dict] = []
+        seen: set[str] = set()
+        for link in (parent_raw.get("spawnLinks") or []):
+            ck = link.get("childSessionKey") or ""
+            if not ck or ck in seen:
+                continue
+            seen.add(ck)
+            child = sessions_by_key.get(ck)
+            if child:
+                sub_cards.append(_subagent_card(child, link))
+            else:
+                parts = ck.split(":")
+                sub_cards.append({
+                    "agent": parts[1] if len(parts) > 1 else "?",
+                    "sessionId": "",
+                    "sessionKey": ck,
+                    "childIdShort": parts[-1][:8] if parts else "",
+                    "model": link.get("modelRequested") or "",
+                    "modelDisplay": MODEL_DISPLAY.get(link.get("modelRequested") or "",
+                                                      link.get("modelRequested") or ""),
+                    "started": link.get("ts"),
+                    "ended": link.get("ts"),
+                    "duration": "—",
+                    "turns": 0, "tokensIn": 0, "tokensOut": 0, "cacheRead": 0,
+                    "cost": 0,
+                    "task": link.get("task", ""),
+                    "topic": (link.get("task", "") or "").split("\n")[0][:200] or "(in attesa)",
+                    "spawnedAt": link.get("ts"),
+                    "status": link.get("status") or "pending",
+                })
+        sub_cards.sort(key=lambda x: x.get("spawnedAt") or "", reverse=True)
+        r["subagents"] = sub_cards
+        r["subagentsCost"] = round(sum(sc.get("cost", 0) or 0 for sc in sub_cards), 6)
+        r["subagentsCount"] = len(sub_cards)
 
     return {
         "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

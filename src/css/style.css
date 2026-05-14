@@ -73,13 +73,46 @@ a { color: inherit; text-decoration: none; }
   z-index: 100;
   padding-top: env(safe-area-inset-top, 0);
 }
-.header-left { display: flex; align-items: center; gap: 8px; }
+.header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .header-icon { font-size: 20px; }
 .header-title {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.2px;
 }
+.viewer-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.viewer-badge.admin {
+  background: rgba(255,149,0,0.15);
+  color: var(--warn);
+  border: 1px solid rgba(255,149,0,0.3);
+}
+.viewer-badge.viewer {
+  background: var(--primary-soft);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.viewer-card {
+  text-align: left;
+}
+.viewer-card p {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.viewer-card b { color: var(--text); }
 .header-action {
   width: 36px; height: 36px;
   border: none;
@@ -1066,6 +1099,181 @@ a { color: inherit; text-decoration: none; }
 .sub-meta {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+/* ─────────── Nested subagents under a parent session ─────────── */
+.nested-subs {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--primary-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nested-subs-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-secondary);
+  padding: 2px 4px;
+}
+.nested-sub {
+  background: var(--card);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.nested-sub.pending { opacity: 0.65; }
+.nested-sub-head {
+  display: grid;
+  grid-template-columns: 10px auto auto 1fr auto 14px;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: 12px;
+}
+.nested-sub-head:active { background: var(--primary-soft); }
+.nested-sub-agent {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.nested-sub-from {
+  font-size: 10px;
+  font-style: italic;
+}
+.nested-sub-task {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nested-sub-cost {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+}
+.nested-sub-body {
+  padding: 0 10px 10px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+/* ─────────── Kind badges on session cards ─────────── */
+.pill.kind-cron {
+  color: var(--warn);
+  border-color: rgba(255,149,0,0.3);
+  background: rgba(255,149,0,0.08);
+}
+.pill.kind-sub {
+  color: var(--text-secondary);
+  background: var(--bg);
+}
+.pill.orphan {
+  color: var(--danger);
+  border-color: rgba(255,59,48,0.25);
+  background: rgba(255,59,48,0.08);
+  font-size: 10px;
+}
+.session-card.kind-cron {
+  border-left: 3px solid var(--warn);
+}
+.session-card.kind-subagent {
+  border-left: 3px solid var(--text-secondary);
+}
+
+/* Live group sits above the toolbar inside Sessions */
+#liveGroup { margin-bottom: 12px; }
+
+/* ─────────── Owner chip (chat-id attribution) ─────────── */
+.owner-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.owner-chip.owner-telegram {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: rgba(0,122,255,0.25);
+}
+.owner-chip.owner-cli {
+  background: rgba(52,199,89,0.10);
+  color: var(--ok);
+  border-color: rgba(52,199,89,0.25);
+}
+.owner-chip.owner-cron {
+  background: rgba(255,149,0,0.10);
+  color: var(--warn);
+  border-color: rgba(255,149,0,0.3);
+}
+.owner-chip.is-me {
+  background: rgba(255,149,0,0.18);
+  color: var(--warn);
+  border-color: rgba(255,149,0,0.4);
+  font-weight: 800;
+}
+.owner-chip.big {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 12px;
+  letter-spacing: 0.3px;
+}
+
+/* Owner banner sits on top of every live card, always visible */
+.live-owner-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.live-owner-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2px;
+}
+.live-card.mine {
+  border: 2px solid rgba(255,149,0,0.45);
+  box-shadow: 0 0 0 1px rgba(255,149,0,0.15), var(--shadow);
+}
+.live-card.mine .live-owner-banner {
+  background: rgba(255,149,0,0.06);
+}
+.live-card.other {
+  border-left: 3px solid var(--primary);
+}
+
+/* Make room for owner chip in live-card head */
+.live-agent-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 /* ─────────── Cron ─────────── */

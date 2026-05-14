@@ -141,6 +141,12 @@ async function renderCron(force = false) {
     list.innerHTML = `<div class="empty error">⚠ ${escHtml(_cronStore.error || "Errore")}</div>`;
     return;
   }
+  if (d.scope === "viewer") {
+    list.innerHTML = '<div class="empty muted">🔒 Solo gli admin vedono i cron.</div>';
+    if (count) count.textContent = "";
+    if (updated) updated.textContent = "";
+    return;
+  }
   if (d.error) {
     list.innerHTML = `<div class="empty error">⚠ ${escHtml(d.error)}</div>`;
     return;
@@ -250,6 +256,12 @@ async function renderSysCron(force = false) {
   const d = _sysCronStore.data;
   if (!d) {
     list.innerHTML = `<div class="empty error">⚠ ${escHtml(_sysCronStore.error || "Errore")}</div>`;
+    return;
+  }
+  if (d.scope === "viewer") {
+    list.innerHTML = '<div class="empty muted">🔒 Solo gli admin vedono il crontab.</div>';
+    if (count) count.textContent = "";
+    if (src) src.textContent = "";
     return;
   }
   if (d.error) {
