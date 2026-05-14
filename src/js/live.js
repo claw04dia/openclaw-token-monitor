@@ -9,8 +9,18 @@ function renderLive() {
   const agents = d.currentByAgent || [];
   const wrap = document.getElementById("liveList");
 
+  const loadedAt = (typeof getLoadedAt === "function") ? getLoadedAt() : Date.now();
+  const ageSec = Math.max(0, Math.floor((Date.now() - loadedAt) / 1000));
+  const ageLabel = ageSec < 2 ? "aggiornato ora" : `aggiornato ${ageSec}s fa`;
+  const statusBar = `
+    <div class="live-status">
+      <span class="live-dot"></span>
+      <span class="live-status-label">live</span>
+      <span class="live-status-ago muted" id="liveUpdatedAt">${ageLabel}</span>
+    </div>`;
+
   if (!agents.length) {
-    wrap.innerHTML = '<div class="empty muted">Nessuna sessione recente</div>';
+    wrap.innerHTML = statusBar + '<div class="empty muted">Nessuna sessione recente</div>';
     return;
   }
 
@@ -19,7 +29,7 @@ function renderLive() {
     _liveInitialized = true;
   }
 
-  wrap.innerHTML = agents.map(s => agentLiveCard(s)).join("");
+  wrap.innerHTML = statusBar + agents.map(s => agentLiveCard(s)).join("");
 
   if (!wrap.dataset.bound) {
     wrap.dataset.bound = "1";

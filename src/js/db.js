@@ -65,6 +65,7 @@ async function loadData(force = false) {
 function getData() { return Store.data || {}; }
 function getError() { return Store.error; }
 function getApiBase() { return API_BASE; }
+function getLoadedAt() { return Store.loadedAt; }
 
 function escHtml(s) {
   const d = document.createElement("div");
