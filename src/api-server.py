@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Token Monitor — authenticated mini-app backend.
 
-Serves the same data exposed by the CLI skill, but gated by Telegram WebApp
-`initData` HMAC validation. Replaces the unauthenticated data-server.py.
+JSON API gated by Telegram WebApp `initData` HMAC validation. Frontend lives
+on GitHub Pages (claw04dia/openclaw-miniapp) and reaches this backend over
+Tailscale Funnel; CORS is restricted to the frontend origin.
 
 Env vars:
   TELEGRAM_BOT_TOKEN    bot token used to validate initData signatures
@@ -18,7 +19,6 @@ import hashlib
 import hmac
 import json
 import logging
-import mimetypes
 import os
 import time
 import urllib.parse
@@ -53,9 +53,6 @@ BUILD_SESSIONS_SCRIPT = Path(__file__).resolve().parent.parent / "build-sessions
 SESSIONS_TTL = 300         # forced rebuild every 5 min even if nothing changed
 SESSIONS_COOLDOWN = 15     # min seconds between rebuilds (rate-limit)
 TRAJECTORIES_GLOB = "agents/*/sessions/*.trajectory.jsonl"
-STATIC_DIR = Path(__file__).resolve().parent
-STATIC_FILES = {"/", "/index.html", "/manifest.json"}
-STATIC_DIRS = ("/css/", "/js/")
 
 _OR_CACHE = {"data": None, "ts": 0}
 _OR_TTL = 60  # seconds
@@ -557,52 +554,6 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-    def _serve_static(self, rel: str):
-        if rel in ("", "/"):
-            rel = "index.html"
-        else:
-            rel = rel.lstrip("/")
-        target = (STATIC_DIR / rel).resolve()
-        # Block path traversal
-        if not str(target).startswith(str(STATIC_DIR)):
-            self._json(403, {"error": "forbidden"})
-            return
-        if not target.is_file():
-            self._json(404, {"error": "not_found"})
-            return
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        body = target.read_bytes()
-        # Telegram WebView ignores no-store on cached script/css. Inject a
-        # per-file mtime version query so the URL changes whenever a file is
-        # edited, forcing a real refetch.
-        if target.name == "index.html":
-            import re
-            def _bust(match):
-                attr, quote, href = match.group(1), match.group(2), match.group(3)
-                if "://" in href or href.startswith("//") or "?" in href:
-                    return match.group(0)
-                asset = (STATIC_DIR / href.lstrip("/")).resolve()
-                try:
-                    v = int(asset.stat().st_mtime)
-                except OSError:
-                    return match.group(0)
-                return f'{attr}={quote}{href}?v={v}{quote}'
-            html = body.decode("utf-8")
-            html = re.sub(r'\b(src|href)=(["\'])([^"\']+\.(?:js|css))\2',
-                          _bust, html)
-            body = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        # Telegram in-app webview caches aggressively; no-store guarantees a
-        # refetch each time the user opens the mini-app.
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self._cors()
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if path == "/health":
@@ -662,10 +613,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log.exception("system cron payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
-            return
-        # Static frontend
-        if path in STATIC_FILES or path.startswith(STATIC_DIRS):
-            self._serve_static(path)
             return
         self._json(404, {"error": "not_found"})
 
