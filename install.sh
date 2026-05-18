@@ -11,7 +11,7 @@
 #      frontend on GitHub Pages with ?api=<this-machine-funnel-url> baked in
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/claw04dia/openclaw-token-monitor/live-section-auto-poll/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/claw04dia/openclaw-token-monitor/main/install.sh \
 #     | bash -s -- --bot-token <BOT_TOKEN> --telegram-user <TELEGRAM_USER_ID>
 #
 # Or, after manual `git clone`:
@@ -21,7 +21,7 @@ set -euo pipefail
 
 # ─── Configuration (rarely changes) ─────────────────────────────────────────
 REPO_URL="https://github.com/claw04dia/openclaw-token-monitor.git"
-REPO_BRANCH="live-section-auto-poll"
+REPO_BRANCH="main"
 INSTALL_DIR="$HOME/.openclaw/cantiere/telegram-token-monitor"
 CREDS_DIR="$HOME/.openclaw/credentials"
 CREDS_FILE="$CREDS_DIR/telegram-token-monitor.env"

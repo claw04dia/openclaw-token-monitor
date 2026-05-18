@@ -67,7 +67,7 @@ has its own install path — `curl -fsSL https://tailscale.com/install.sh | sh`)
 ### Step 3 — Run the install script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/claw04dia/openclaw-token-monitor/live-section-auto-poll/install.sh \
+curl -fsSL https://raw.githubusercontent.com/claw04dia/openclaw-token-monitor/main/install.sh \
   | bash -s -- --bot-token <BOT_TOKEN_FROM_BOTFATHER> --telegram-user <USER_ID_FROM_USERINFOBOT>
 ```
 
