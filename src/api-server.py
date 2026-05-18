@@ -48,6 +48,7 @@ TOKEN_USAGE_PATH = os.path.expanduser("~/.openclaw/workspace/memory/token-usage.
 AUTH_PROFILES_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
 CRON_JOBS_PATH = os.path.expanduser("~/.openclaw/cron/jobs.json")
 SESSIONS_CACHE = Path.home() / ".cache" / "token-monitor" / "sessions.json"
+ACTIVITY_CACHE = Path.home() / ".cache" / "token-monitor" / "openrouter-activity.json"
 BUILD_SESSIONS_SCRIPT = Path(__file__).resolve().parent.parent / "build-sessions.py"
 SESSIONS_TTL = 300         # forced rebuild every 5 min even if nothing changed
 SESSIONS_COOLDOWN = 15     # min seconds between rebuilds (rate-limit)
@@ -58,6 +59,8 @@ STATIC_DIRS = ("/css/", "/js/")
 
 _OR_CACHE = {"data": None, "ts": 0}
 _OR_TTL = 60  # seconds
+_ACTIVITY_CACHE = {"data": None, "ts": 0}
+_ACTIVITY_TTL = 300  # 5 min — OpenRouter activity rolls forward slowly
 
 
 def _read_openrouter_key() -> str:
@@ -114,6 +117,116 @@ def fetch_openrouter_spend() -> dict:
     _OR_CACHE["data"] = out
     _OR_CACHE["ts"] = time.time()
     return out
+
+
+def fetch_openrouter_activity() -> dict:
+    """Persist daily OpenRouter spend snapshots so build-sessions.py can
+    reconcile against the authoritative numbers.
+
+    OpenRouter's /api/v1/activity endpoint (per-day per-model rollup) requires
+    a provisioning-scope key which inference keys don't have (returns 403). So
+    we fall back to /api/v1/auth/key which gives `usage_daily` / `usage_weekly`
+    / `usage_monthly` for the current inference key — accurate at day-total
+    granularity, just without the per-model breakdown.
+
+    We snapshot today's value into a per-date map on disk; running daily, this
+    accretes into a real history that survives OpenRouter API hiccups.
+
+    Shape: {fetchedAt, days: {date: {totalCost, source}}}
+    """
+    if _ACTIVITY_CACHE["data"] and (time.time() - _ACTIVITY_CACHE["ts"]) < _ACTIVITY_TTL:
+        return _ACTIVITY_CACHE["data"]
+    key = _read_openrouter_key()
+    if not key:
+        return {"error": "no_key", "days": {}, "fetchedAt": 0}
+    # Try the rich /activity endpoint first — works if the key has the scope.
+    per_model: dict[str, dict[str, dict]] = {}
+    try:
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/activity",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            raw = json.loads(r.read())
+        for row in raw.get("data") or []:
+            date = row.get("date") or ""
+            model = row.get("model") or ""
+            if not date or not model:
+                continue
+            slot = per_model.setdefault(date, {}).setdefault(model, {
+                "requests": 0, "promptTokens": 0, "completionTokens": 0,
+                "reasoningTokens": 0, "cost": 0.0, "providers": {},
+            })
+            slot["requests"] += int(row.get("requests", 0) or 0)
+            slot["promptTokens"] += int(row.get("prompt_tokens", 0) or 0)
+            slot["completionTokens"] += int(row.get("completion_tokens", 0) or 0)
+            slot["reasoningTokens"] += int(row.get("reasoning_tokens", 0) or 0)
+            slot["cost"] += float(row.get("usage", 0) or 0)
+            pname = row.get("provider_name") or ""
+            if pname:
+                slot["providers"][pname] = slot["providers"].get(pname, 0) + int(row.get("requests", 0) or 0)
+        for day in per_model.values():
+            for slot in day.values():
+                slot["cost"] = round(slot["cost"], 6)
+    except urllib.error.HTTPError as e:
+        if e.code != 403:
+            log.warning("openrouter /activity HTTP %s: %s", e.code, e.reason)
+        # 403 = expected (inference key lacks scope); silently fall through
+        # to the /auth/key fallback below.
+    except Exception as e:
+        log.warning("openrouter /activity failed: %s", e)
+
+    # Fallback / supplement: /auth/key — always works and gives a day TOTAL we
+    # can attribute to today's date even when /activity is denied.
+    day_totals: dict[str, dict] = {}
+    try:
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            ak = json.loads(r.read()).get("data", {})
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        day_totals[today] = {
+            "totalCost": round(float(ak.get("usage_daily", 0) or 0), 6),
+            "source": "auth/key.usage_daily",
+        }
+    except Exception as e:
+        log.warning("openrouter /auth/key activity-fallback failed: %s", e)
+
+    # Load existing history so older snapshots survive
+    history_per_model: dict[str, dict] = {}
+    history_day_totals: dict[str, dict] = {}
+    try:
+        with open(ACTIVITY_CACHE) as f:
+            disk = json.load(f)
+        history_per_model = disk.get("perModel", {}) or {}
+        history_day_totals = disk.get("dayTotals", {}) or {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Merge: fresh wins for any date we just fetched
+    for date, day in per_model.items():
+        history_per_model[date] = day
+    for date, slot in day_totals.items():
+        history_day_totals[date] = slot
+
+    out = {
+        "fetchedAt": int(time.time()),
+        "perModel": history_per_model,   # per-day per-model (only when /activity allowed)
+        "dayTotals": history_day_totals, # per-day totals (always available via /auth/key)
+        # Legacy alias so build-sessions.py keeps working if it reads .days
+        "days": history_per_model,
+    }
+    try:
+        ACTIVITY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVITY_CACHE.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    except Exception as e:
+        log.warning("activity cache write failed: %s", e)
+    _ACTIVITY_CACHE["data"] = out
+    _ACTIVITY_CACHE["ts"] = time.time()
+    return out
+
 
 MODEL_MAP = {
     "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
@@ -204,6 +317,10 @@ def _maybe_rebuild_sessions():
 
 
 def build_payload() -> dict:
+    # Refresh the OpenRouter activity cache BEFORE rebuilding sessions so that
+    # build-sessions.py can read the latest per-day per-model billed totals
+    # off disk and surface the reconciliation in its output.
+    fetch_openrouter_activity()
     _maybe_rebuild_sessions()
 
     data = {"updatedAt": None, "prices": [], "sessions": [],
@@ -219,6 +336,10 @@ def build_payload() -> dict:
         data["bloated"] = sess.get("bloated", [])
         data["daily"] = sess.get("daily", [])
         data["currentByAgent"] = sess.get("currentByAgent", [])
+        data["fallbackSummary"] = sess.get("fallbackSummary", {})
+        data["reconciliation"] = sess.get("reconciliation", {})
+        data["errorSpend"] = sess.get("errorSpend", {})
+        data["gatewayActivity"] = sess.get("gatewayActivity", {})
         data["stats"] = {
             "totalSessions": sess.get("sessionsCount", 0),
             "totalTokensIn": sess.get("totalTokensIn", 0),
@@ -451,6 +572,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         body = target.read_bytes()
+        # Telegram WebView ignores no-store on cached script/css. Inject a
+        # per-file mtime version query so the URL changes whenever a file is
+        # edited, forcing a real refetch.
+        if target.name == "index.html":
+            import re
+            def _bust(match):
+                attr, quote, href = match.group(1), match.group(2), match.group(3)
+                if "://" in href or href.startswith("//") or "?" in href:
+                    return match.group(0)
+                asset = (STATIC_DIR / href.lstrip("/")).resolve()
+                try:
+                    v = int(asset.stat().st_mtime)
+                except OSError:
+                    return match.group(0)
+                return f'{attr}={quote}{href}?v={v}{quote}'
+            html = body.decode("utf-8")
+            html = re.sub(r'\b(src|href)=(["\'])([^"\']+\.(?:js|css))\2',
+                          _bust, html)
+            body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -539,6 +679,12 @@ def main():
         raise SystemExit("TELEGRAM_ALLOWED_USER env var required")
     log.info("listening on %s:%d (allowed=%s, admin=%s)",
              BIND, PORT, sorted(ALLOWED_USERS), sorted(ADMIN_USERS))
+    # Warm caches at startup so the first request (and build-sessions.py) see
+    # fresh OpenRouter activity data. Failure is non-fatal — we serve cached.
+    try:
+        fetch_openrouter_activity()
+    except Exception as e:
+        log.warning("activity warmup failed: %s", e)
     HTTPServer((BIND, PORT), Handler).serve_forever()
 
 

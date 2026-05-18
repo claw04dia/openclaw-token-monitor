@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -20,23 +21,75 @@ from pathlib import Path
 AGENTS_DIR = Path.home() / ".openclaw" / "agents"
 OUT_PATH = Path.home() / ".cache" / "token-monitor" / "sessions.json"
 
-# OpenRouter pricing in $/M tokens (input / output / cacheRead)
-MODEL_PRICING = {
-    "deepseek/deepseek-v4-flash":          {"in": 0.14, "out": 0.28, "cache": 0.003},
-    "deepseek/deepseek-v4-pro":            {"in": 0.44, "out": 0.87, "cache": 0.004},
-    "moonshotai/kimi-k2.6":                {"in": 0.74, "out": 3.49, "cache": 0.14},
-    "qwen/qwen3-coder-plus":               {"in": 0.65, "out": 3.25, "cache": 0.13},
-    "google/gemma-4-31b-it":               {"in": 0.13, "out": 0.38, "cache": 0.0},
-    "google/gemma-4-31b-it:free":          {"in": 0.0,  "out": 0.0,  "cache": 0.0},
-    "xiaomi/mimo-v2-pro":                  {"in": 1.0,  "out": 3.0,  "cache": 0.2},
-    "z-ai/glm-4.7":                        {"in": 0.38, "out": 1.74, "cache": 0.0},
-    "z-ai/glm-4.7-flash":                  {"in": 0.06, "out": 0.40, "cache": 0.01},
-    "z-ai/glm-4.5-air":                    {"in": 0.13, "out": 0.85, "cache": 0.025},
-    "openai/gpt-4o-mini":                  {"in": 0.15, "out": 0.60, "cache": 0.075},
-    "qwen/qwen3.6-35b-a3b":                {"in": 0.30, "out": 0.90, "cache": 0.06},
-    "qwen/qwen3-235b-a22b-thinking-2507":  {"in": 0.30, "out": 1.20, "cache": 0.06},
+# OpenRouter pricing in $/M tokens (input / output / cacheRead).
+# These are the authoritative fallback values — at runtime we ALSO load the
+# live OpenRouter price catalog from ~/.openclaw/cache/openrouter-models.json
+# (populated by the gateway) and prefer those, so prices stay in sync with
+# what OpenRouter actually bills.
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    "deepseek/deepseek-v4-flash":          {"in": 0.126, "out": 0.252, "cache": 0.0252},
+    "deepseek/deepseek-v4-pro":            {"in": 0.435, "out": 0.87,  "cache": 0.003625},
+    "moonshotai/kimi-k2.6":                {"in": 0.73,  "out": 3.49,  "cache": 0.25},
+    "qwen/qwen3-coder-plus":               {"in": 0.65,  "out": 3.25,  "cache": 0.13},
+    "google/gemma-4-31b-it":               {"in": 0.12,  "out": 0.37,  "cache": 0.0},
+    "google/gemma-4-31b-it:free":          {"in": 0.0,   "out": 0.0,   "cache": 0.0},
+    "google/gemma-4-26b-a4b-it":           {"in": 0.06,  "out": 0.33,  "cache": 0.0},
+    "xiaomi/mimo-v2-pro":                  {"in": 1.0,   "out": 3.0,   "cache": 0.2},
+    "xiaomi/mimo-v2.5-pro":                {"in": 1.0,   "out": 3.0,   "cache": 0.2},
+    "z-ai/glm-4.7":                        {"in": 0.40,  "out": 1.75,  "cache": 0.08},
+    "z-ai/glm-4.7-flash":                  {"in": 0.06,  "out": 0.40,  "cache": 0.01},
+    "z-ai/glm-4.5-air":                    {"in": 0.13,  "out": 0.85,  "cache": 0.025},
+    "openai/gpt-4o-mini":                  {"in": 0.15,  "out": 0.60,  "cache": 0.075},
+    "qwen/qwen3.6-35b-a3b":                {"in": 0.15,  "out": 1.0,   "cache": 0.05},
+    "qwen/qwen3-30b-a3b":                  {"in": 0.09,  "out": 0.45,  "cache": 0.0},
+    "qwen/qwen3-235b-a22b-thinking-2507":  {"in": 0.30,  "out": 1.20,  "cache": 0.06},
+    "anthropic/claude-sonnet-4.6":         {"in": 3.0,   "out": 15.0,  "cache": 0.30},
+    "anthropic/claude-opus-4-7":           {"in": 15.0,  "out": 75.0,  "cache": 1.50},
+    "anthropic/claude-haiku-4.5":          {"in": 1.0,   "out": 5.0,   "cache": 0.10},
 }
 FALLBACK_PRICE = {"in": 0.30, "out": 1.0, "cache": 0.0}
+
+OPENROUTER_MODELS_CACHE = Path.home() / ".openclaw" / "cache" / "openrouter-models.json"
+
+
+def _load_openrouter_prices() -> None:
+    """Merge prices from OpenClaw's openrouter-models.json cache (refreshed by
+    the gateway) into MODEL_PRICING so we track the same numbers OpenRouter
+    actually charges. The cached file has shape {models: {id: {cost: {input,
+    output, cacheRead, cacheWrite}}}}.
+
+    OpenRouter uses sentinel models (openrouter/auto, pareto-code, …) priced
+    at -1_000_000 to mark "no fixed price". Skip those — they'd make every
+    aggregate sum into a giant negative number."""
+    try:
+        with open(OPENROUTER_MODELS_CACHE) as f:
+            doc = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    models = doc.get("models") or {}
+    for mid, info in models.items():
+        cost = (info or {}).get("cost") or {}
+        if "input" not in cost or "output" not in cost:
+            continue
+        try:
+            pin   = float(cost.get("input",     0) or 0)
+            pout  = float(cost.get("output",    0) or 0)
+            pcache = float(cost.get("cacheRead", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        # Skip sentinel/invalid entries (negative prices, absurd values).
+        if pin < 0 or pout < 0 or pcache < 0:
+            continue
+        if pin > 1000 or pout > 1000:  # safety bound, real models stay under $1k/M
+            continue
+        MODEL_PRICING[mid] = {"in": pin, "out": pout, "cache": pcache}
+
+
+_load_openrouter_prices()
+
+# Models that don't actually hit OpenRouter (local inference, gateway internals).
+# Charged at zero so they don't pollute the OpenRouter reconciliation.
+LOCAL_MODELS = ("hf:", "gateway-injected", "local:")
 
 # Context window per model in tokens (provider-advertised max).
 MODEL_CONTEXT = {
@@ -80,15 +133,77 @@ NOISE_TRIGGERS = (
 )
 
 
+def _normalize_model(model: str) -> str:
+    """OpenClaw stores some models with an `openrouter/` prefix (the gateway
+    namespace). Pricing lookups use the bare provider/model form, so strip it.
+    """
+    if not model:
+        return ""
+    if model.startswith("openrouter/"):
+        return model[len("openrouter/"):]
+    return model
+
+
+def _price_for_model(model: str) -> dict:
+    """Resolve pricing for a model id. Returns FALLBACK_PRICE when unknown so
+    callers can keep summing, but the model is logged so we notice gaps."""
+    if not model:
+        return FALLBACK_PRICE
+    if any(model.startswith(p) for p in LOCAL_MODELS):
+        return {"in": 0.0, "out": 0.0, "cache": 0.0}
+    norm = _normalize_model(model)
+    if norm in MODEL_PRICING:
+        return MODEL_PRICING[norm]
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    _MISSING_MODELS.add(model)
+    return FALLBACK_PRICE
+
+
+_MISSING_MODELS: set[str] = set()
+
+
 def cost_for(model: str, usage: dict) -> float:
     """OpenClaw schema: total = input + output + cacheRead (disjoint).
     input = non-cached prompt tokens, cacheRead = cached prompt tokens.
     """
-    p = MODEL_PRICING.get(model, FALLBACK_PRICE)
+    p = _price_for_model(model)
     new_input = int(usage.get("input", 0) or 0)
     output = int(usage.get("output", 0) or 0)
     cache_read = int(usage.get("cacheRead", 0) or 0)
     return new_input / 1e6 * p["in"] + output / 1e6 * p["out"] + cache_read / 1e6 * p["cache"]
+
+
+def model_breakdown(per_model_usage: dict, primary_model: str) -> tuple[list[dict], float, bool]:
+    """Convert perModelUsage map → sorted list of {model, tokensIn, tokensOut,
+    cacheRead, cost, isPrimary} entries, plus the cost attributed to NON-primary
+    models (fallback spend) and whether any fallback actually happened.
+
+    A session is "fallbackUsed" only if a non-primary model actually billed
+    tokens — single-model sessions never count even when the primary is
+    formally an alias for a chained model.
+    """
+    if not per_model_usage:
+        return [], 0.0, False
+    entries: list[dict] = []
+    fallback_cost = 0.0
+    for mid, u in per_model_usage.items():
+        c = cost_for(mid, u)
+        is_primary = (mid == primary_model)
+        if not is_primary:
+            fallback_cost += c
+        entries.append({
+            "model": mid,
+            "modelDisplay": MODEL_DISPLAY.get(mid, mid),
+            "tokensIn": int(u.get("input", 0) or 0),
+            "tokensOut": int(u.get("output", 0) or 0),
+            "cacheRead": int(u.get("cacheRead", 0) or 0),
+            "cost": round(c, 6),
+            "isPrimary": is_primary,
+        })
+    entries.sort(key=lambda e: -e["cost"])
+    used = sum(1 for e in entries if e["tokensIn"] or e["tokensOut"])
+    return entries, round(fallback_cost, 6), used > 1
 
 
 TASK_MARKERS = ("## TASK SPECIFICO", "## Your Role", "## YOUR ROLE")
@@ -298,7 +413,7 @@ def parse_trajectory(path: str) -> dict | None:
                             "tokensIn": int(u.get("input", 0) or 0),
                             "tokensOut": int(u.get("output", 0) or 0),
                             "cacheRead": int(u.get("cacheRead", 0) or 0),
-                            "promptPreview": (data.get("finalPromptText") or "")[:400],
+                            "promptPreview": strip_runtime_prefix(data.get("finalPromptText") or "").strip()[:400],
                             "replyPreview": (first_assistant or "")[:400],
                         })
                 elif t == "trace.artifacts":
@@ -397,6 +512,10 @@ def _real_task(task: str) -> str:
 
 
 def is_substantial(s: dict) -> bool:
+    """Display-only filter: returns True when a session is worth showing in
+    the Sessions list. Noise sessions (cron heartbeats, daily-notes, rotators)
+    still get tracked for cost reconciliation against OpenRouter — this only
+    controls visibility in the UI."""
     fp = s.get("finalPrompt") or ""
     at = (s.get("assistantText") or "").lower()
     if any(fp.startswith(prefix) for prefix in NOISE_TRIGGERS):
@@ -409,10 +528,43 @@ def is_substantial(s: dict) -> bool:
     return True
 
 
+def _classify_noise(s: dict) -> str:
+    """Return a label for *why* a session is noise (empty if substantial).
+    Used to attribute hidden spend in the UI ("$6 from cron rotator")."""
+    fp = s.get("finalPrompt") or ""
+    at = (s.get("assistantText") or "").lower()
+    for prefix in NOISE_TRIGGERS:
+        if fp.startswith(prefix):
+            return prefix.strip("[]:").split(":", 1)[-1] or "system"
+    for k in ("idle-but-light", "heartbeat_ok", "nessun contenuto"):
+        if k in at:
+            return "idle"
+    out_tok = (s.get("usage") or {}).get("output", 0) or 0
+    if out_tok < 50:
+        return "tiny"
+    return ""
+
+
 PLACEHOLDER_RE = re.compile(r"<[^>]{3,}>")  # detect <descrizione del task...> template stubs
 TELEGRAM_PREFIX_RE = re.compile(
     r"^\[Telegram\s+[^\]]+id:\d+[^\]]*\]\s*", re.MULTILINE
 )
+# Strip OpenClaw runtime-context blocks: `<Name> (untrusted metadata):` headers
+# followed by a fenced ```json … ``` body. Multiple blocks (Conversation info,
+# Sender, …) usually stack at the top of a Telegram prompt.
+UNTRUSTED_META_BLOCK_RE = re.compile(
+    r"^[^\n]*\(untrusted metadata\):[ \t]*\n```(?:json)?\n[\s\S]*?\n```[ \t]*\n?",
+    re.MULTILINE,
+)
+
+
+def strip_runtime_prefix(text: str) -> str:
+    """Remove Telegram/runtime metadata wrappers from a user prompt."""
+    if not text:
+        return text
+    text = TELEGRAM_PREFIX_RE.sub("", text)
+    text = UNTRUSTED_META_BLOCK_RE.sub("", text)
+    return text
 
 
 def extract_topic(s: dict) -> str:
@@ -428,16 +580,18 @@ def extract_topic(s: dict) -> str:
 
     # Priority 2: explicit user prompts (some sessions log them as events)
     for p in (s.get("userPrompts") or []):
-        first = p.strip().split("\n")[0]
-        first = re.sub(r"^[\[\(].*?[\]\)]\s*", "", first)
-        if len(first) >= 4:
-            return first[:200]
+        body = strip_runtime_prefix(p).strip()
+        for line in body.split("\n"):
+            first = line.strip()
+            first = re.sub(r"^[\[\(].*?[\]\)]\s*", "", first)
+            if len(first) >= 4:
+                return first[:200]
 
     # Priority 3: finalPromptText with Telegram prefix — extract user's actual message
     fp = (s.get("finalPrompt") or "").strip()
     if fp:
         # Strip Telegram-headers prefix; take first content line
-        body = TELEGRAM_PREFIX_RE.sub("", fp)
+        body = strip_runtime_prefix(fp)
         # Skip [media attached: ...] / [Forwarded ...] / <media:.../> / <file ...>
         for line in body.split("\n"):
             line = line.strip()
@@ -482,7 +636,7 @@ def clean_excerpt(text: str, max_len: int = 220) -> str:
     """Strip Telegram metadata + media markup from a prompt excerpt."""
     if not text:
         return ""
-    body = TELEGRAM_PREFIX_RE.sub("", text)
+    body = strip_runtime_prefix(text)
     out_lines = []
     for line in body.split("\n"):
         line = line.strip()
@@ -497,6 +651,403 @@ def clean_excerpt(text: str, max_len: int = 220) -> str:
         out_lines.append(line)
     joined = " ".join(out_lines)
     return joined[:max_len]
+
+
+# Rough per-call estimates for cost approximation of embedded runs that
+# don't write trajectory files. We don't know the actual tokens (the journal
+# omits them), so each call counts as "an attempt against this model with
+# this typical request size". The figures match the orders of magnitude we
+# saw in the gateway logs (max_tokens 4k/16k/32k, prompt ~1-2k tokens).
+GATEWAY_CALL_PROFILE = {
+    # source : { "tokensIn": int, "tokensOut": int }
+    "active-memory":  {"tokensIn": 1500, "tokensOut": 200},
+    "session-embed":  {"tokensIn": 1500, "tokensOut": 300},
+    "announce":       {"tokensIn": 800,  "tokensOut": 200},
+}
+
+_GATEWAY_RUN_RE = re.compile(
+    r"runId=(?P<runId>\S+)\s+isError=(?P<isError>\w+)\s+model=(?P<model>\S+)"
+)
+_GATEWAY_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})T")
+
+
+_GATEWAY_END_RE = re.compile(
+    r"runId=(?P<runId>\S+)\s+isError=(?P<isError>\w+)\s+model=(?P<model>\S+)\s+provider=(?P<provider>\S+)"
+)
+_GATEWAY_CTXOVF_RE = re.compile(
+    r"requested about (?P<requested>\d+) tokens \((?P<text>\d+) of text input"
+)
+_GATEWAY_RATE_RE = re.compile(r"rate limit|429|RATE.LIMIT", re.IGNORECASE)
+
+
+def parse_error_spend(days_back: int = 14) -> dict:
+    """Per-day attribution of EVERY errored embedded run from the gateway journal.
+
+    The journal logs `embedded run agent end isError=true model=X provider=Y
+    error=<msg> rawError=<code>` for every failed API call. These calls send
+    input tokens to OpenRouter; whether or not OpenRouter actually bills depends
+    on the upstream provider's response, but conservatively we treat every
+    failed call as a real cost driver and surface it.
+
+    For each error we estimate input tokens from two sources, in order:
+      1. context-overflow diag — when error contains "requested about N tokens",
+         that N is the exact prompt size the gateway shipped.
+      2. The successful sibling (same runId, isError=false) when it exists —
+         the failing attempts in the same turn were carrying similar context.
+      3. A model-specific fallback estimate (active-memory ~1500 tokens, regular
+         session ~25_000 tokens — based on what we observed today).
+
+    Output shape per day:
+      {
+        "<date>": {
+          "totalCost": float,
+          "calls": int,
+          "byCategory": {
+            "active-memory": {"calls": N, "models": {m: count}, "cost": $},
+            "session":       {"calls": N, "models": {m: count}, "cost": $},
+            "announce":      {"calls": N, "models": {m: count}, "cost": $},
+          },
+          "byErrorKind": {"500": N, "429": M, "context-overflow": K, "other": …},
+          "topRuns": [{"runId", "calls", "model", "estCost", "errorSample"}],
+        }
+      }
+    """
+    try:
+        r = subprocess.run(
+            ["journalctl", "--user", "-u", "openclaw-gateway",
+             "--since", f"{days_back} days ago", "--no-pager", "-o", "short-iso"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if r.returncode != 0:
+        return {}
+
+    # First pass: gather per-runId estimated input tokens from any
+    # successful sibling AND from context-overflow diagnostics.
+    sibling_input: dict[str, int] = {}
+    runid_overflow: dict[str, int] = {}
+    for line in r.stdout.splitlines():
+        if "embedded run agent end" in line:
+            em = _GATEWAY_END_RE.search(line)
+            if em and em.group("isError") == "false":
+                # We don't see token counts in the journal, but a non-error
+                # end at least confirms which model carried the turn — used
+                # by the cost estimator as a model hint, not a token count.
+                sibling_input.setdefault(em.group("runId"), 0)
+        if "requested about" in line:
+            ov = _GATEWAY_CTXOVF_RE.search(line)
+            if ov:
+                # Extract the runId from the same line if present
+                em = _GATEWAY_END_RE.search(line)
+                rid = em.group("runId") if em else None
+                if rid:
+                    runid_overflow[rid] = max(runid_overflow.get(rid, 0),
+                                              int(ov.group("requested")))
+
+    # Model-specific default input estimate when nothing better is available.
+    # active-memory queries are short (one user message + tail of conversation),
+    # whereas session retries carry the full agent context.
+    DEFAULT_INPUT = {"active-memory": 2000, "announce": 1000, "session": 25000}
+    DEFAULT_OUTPUT = {"active-memory": 0, "announce": 100, "session": 100}
+
+    days: dict[str, dict] = defaultdict(lambda: {
+        "totalCost": 0.0,
+        "calls": 0,
+        "byCategory": {
+            "active-memory": {"calls": 0, "models": defaultdict(int), "cost": 0.0},
+            "session":       {"calls": 0, "models": defaultdict(int), "cost": 0.0},
+            "announce":      {"calls": 0, "models": defaultdict(int), "cost": 0.0},
+        },
+        "byErrorKind": defaultdict(int),
+        "runs": defaultdict(lambda: {"calls": 0, "model": "", "estCost": 0.0,
+                                     "errorSample": "", "category": ""}),
+    })
+
+    # Per OpenRouter's billing rules, requests rejected BEFORE reaching the
+    # upstream provider are not charged. We only count error kinds that
+    # historically result in real charges; the rest get counted (visibility)
+    # but assigned $0 estimated cost.
+    BILLABLE_ERROR_KINDS = {"500", "timeout"}  # upstream gave us a stream that died
+    for line in r.stdout.splitlines():
+        if "embedded run agent end" not in line:
+            continue
+        em = _GATEWAY_END_RE.search(line)
+        if not em or em.group("isError") != "true":
+            continue
+        ts_m = _GATEWAY_TS_RE.search(line)
+        if not ts_m:
+            continue
+        date = ts_m.group(1)
+        run_id = em.group("runId")
+        model = em.group("model")
+        # Categorise by runId prefix
+        if run_id.startswith("active-memory"):
+            cat = "active-memory"
+        elif run_id.startswith("announce"):
+            cat = "announce"
+        else:
+            cat = "session"
+        # Estimate this call's input tokens
+        if run_id in runid_overflow:
+            est_in = runid_overflow[run_id]
+        else:
+            est_in = DEFAULT_INPUT.get(cat, 5000)
+        est_out = DEFAULT_OUTPUT.get(cat, 100)
+        # Classify error (the result determines whether we estimate any cost)
+        if "context length" in line or "Context overflow" in line:
+            err_kind = "context-overflow"
+        elif "500 Internal Server Error" in line or "HTTP 500" in line:
+            err_kind = "500"
+        elif _GATEWAY_RATE_RE.search(line):
+            err_kind = "429"
+        elif "timeout" in line:
+            err_kind = "timeout"
+        else:
+            err_kind = "other"
+        # Only attribute a cost when the error kind is one OpenRouter actually
+        # bills for. Other kinds still show in the count breakdown so the user
+        # sees them.
+        call_cost = (cost_for(model, {"input": est_in, "output": est_out, "cacheRead": 0})
+                     if err_kind in BILLABLE_ERROR_KINDS else 0.0)
+        # Pull a short error sample for the top-runs view
+        err_sample = ""
+        idx = line.find("error=")
+        if idx >= 0:
+            err_sample = line[idx + len("error="):idx + len("error=") + 160]
+        day = days[date]
+        day["totalCost"] += call_cost
+        day["calls"] += 1
+        bcat = day["byCategory"][cat]
+        bcat["calls"] += 1
+        bcat["models"][model] += 1
+        bcat["cost"] += call_cost
+        day["byErrorKind"][err_kind] += 1
+        run = day["runs"][run_id]
+        run["calls"] += 1
+        run["model"] = model
+        run["estCost"] += call_cost
+        run["category"] = cat
+        if not run["errorSample"]:
+            run["errorSample"] = err_sample
+
+    out: dict[str, dict] = {}
+    for date, day in days.items():
+        # Pick top-5 most expensive runs to surface in the UI
+        top_runs = sorted(day["runs"].items(), key=lambda kv: -kv[1]["estCost"])[:5]
+        out[date] = {
+            "totalCost": round(day["totalCost"], 6),
+            "calls": day["calls"],
+            "byCategory": {
+                cat: {
+                    "calls": b["calls"],
+                    "models": dict(b["models"]),
+                    "cost": round(b["cost"], 6),
+                } for cat, b in day["byCategory"].items()
+            },
+            "byErrorKind": dict(day["byErrorKind"]),
+            "topRuns": [
+                {
+                    "runId": rid,
+                    "calls": rv["calls"],
+                    "model": rv["model"],
+                    "modelDisplay": MODEL_DISPLAY.get(rv["model"], rv["model"]),
+                    "category": rv["category"],
+                    "estCost": round(rv["estCost"], 6),
+                    "errorSample": rv["errorSample"],
+                } for rid, rv in top_runs
+            ],
+        }
+    return out
+
+
+OPENROUTER_ACTIVITY_CACHE = Path.home() / ".cache" / "token-monitor" / "openrouter-activity.json"
+
+
+def load_openrouter_activity() -> dict:
+    """Read the per-day per-model billed totals that api-server.py refreshes
+    from OpenRouter's /api/v1/activity. Shape:
+      {fetchedAt: int, days: {date: {model: {requests, promptTokens,
+       completionTokens, reasoningTokens, cost, providers}}}}
+    """
+    try:
+        with open(OPENROUTER_ACTIVITY_CACHE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"days": {}, "fetchedAt": 0}
+
+
+def reconcile_with_openrouter(records: list[dict], activity: dict,
+                              error_spend: dict) -> dict:
+    """Per-day reconciliation: OpenRouter says X, our local trajectories cover
+    Y, the gateway journal explains Z worth of errored/non-trajectory calls,
+    and the residual is the still-unexplained gap (could be plugin sub-agent
+    successes that don't write transcripts, or upstream billing oddities).
+
+    Output:
+      {
+        "<date>": {
+          "openrouterCost": float,
+          "openrouterRequests": int,
+          "trackedCost": float,           # from session trajectories
+          "errorCost": float,             # estimated from error journal
+          "untrackedCost": float,         # OR - tracked - errors
+          "byModel": [
+            {model, modelDisplay, openrouterCost, trackedCost, gap,
+             openrouterRequests, openrouterPromptTokens, openrouterCompletionTokens}
+          ],
+          "perModelCoverage": float,      # tracked / openrouter (cost ratio)
+        }
+      }
+    """
+    # Local cost per (date, model) from trajectory records
+    local: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for r in records:
+        date = r["date"]
+        for mb in r.get("modelBreakdown") or []:
+            local[date][mb["model"]] += mb["cost"]
+        # Fallback: if a record has no breakdown (older format), use the flat cost
+        if not r.get("modelBreakdown"):
+            local[date][r["model"]] += r["cost"]
+
+    out: dict[str, dict] = {}
+    per_model_days = (activity or {}).get("perModel") or (activity or {}).get("days") or {}
+    day_totals = (activity or {}).get("dayTotals") or {}
+    all_dates = set(per_model_days.keys()) | set(day_totals.keys()) | set(local.keys())
+    for date in sorted(all_dates):
+        or_models = per_model_days.get(date) or {}
+        # Prefer per-model sum (most authoritative) but fall back to /auth/key
+        # day total when per-model isn't available (inference key, 403 on /activity).
+        if or_models:
+            or_total = sum(s["cost"] for s in or_models.values())
+            or_total_source = "openrouter.activity"
+        else:
+            or_total = float((day_totals.get(date) or {}).get("totalCost", 0.0))
+            or_total_source = (day_totals.get(date) or {}).get("source", "openrouter.authKey")
+        or_requests = sum(int(s.get("requests", 0) or 0) for s in or_models.values())
+        tracked = sum(local.get(date, {}).values())
+        errs = (error_spend or {}).get(date, {}).get("totalCost", 0.0)
+        per_model = []
+        all_models = set(or_models.keys()) | set(local.get(date, {}).keys())
+        for model in all_models:
+            o = or_models.get(model) or {}
+            or_cost = o.get("cost", 0.0)
+            tr_cost = local.get(date, {}).get(model, 0.0)
+            per_model.append({
+                "model": model,
+                "modelDisplay": MODEL_DISPLAY.get(model, model),
+                "openrouterCost": round(or_cost, 6),
+                "trackedCost": round(tr_cost, 6),
+                "gap": round(or_cost - tr_cost, 6),
+                "openrouterRequests": int(o.get("requests", 0) or 0),
+                "openrouterPromptTokens": int(o.get("promptTokens", 0) or 0),
+                "openrouterCompletionTokens": int(o.get("completionTokens", 0) or 0),
+                "openrouterReasoningTokens": int(o.get("reasoningTokens", 0) or 0),
+                "providers": o.get("providers") or {},
+                # When OR side is missing (inference key can't see per-model
+                # truth), `gap` becomes meaningless — flag the row.
+                "openrouterUnknown": not bool(or_models),
+            })
+        # Largest absolute gap first — that's what the user wants to see
+        per_model.sort(key=lambda x: -abs(x["gap"]) if not x["openrouterUnknown"] else -x["trackedCost"])
+        coverage = (tracked / or_total) if or_total > 0 else None
+        out[date] = {
+            "openrouterCost": round(or_total, 6),
+            "openrouterRequests": or_requests,
+            "openrouterCostSource": or_total_source,
+            "openrouterPerModelKnown": bool(or_models),
+            "trackedCost": round(tracked, 6),
+            "errorCost": round(errs, 6),
+            "untrackedCost": round(max(0.0, or_total - tracked - errs), 6),
+            "byModel": per_model,
+            "perModelCoverage": round(coverage, 4) if coverage is not None else None,
+        }
+    return out
+
+
+def parse_gateway_journal(days_back: int = 14) -> dict:
+    """Scan `openclaw-gateway`'s systemd journal for embedded LLM calls — the
+    invisible cost drivers that don't write trajectory files (active-memory
+    plugin hook, fallback retries, etc.). Returns a per-date breakdown the UI
+    can surface so the user sees where each cent really goes.
+
+    Output shape:
+      {
+        "2026-05-15": {
+          "activeMemory": {"calls": 27, "errors": 5, "models": {...}, "estCost": 0.18},
+          "session":       {"calls": 12, "errors": 0, "models": {...}, "estCost": 0.04},
+          "announce":      {"calls": 1,  "errors": 0, "models": {...}, "estCost": 0.001},
+          "fallbacks":     34,
+        },
+        ...
+      }
+    """
+    try:
+        r = subprocess.run(
+            ["journalctl", "--user", "-u", "openclaw-gateway",
+             "--since", f"{days_back} days ago", "--no-pager", "-o", "short-iso"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if r.returncode != 0:
+        return {}
+
+    days: dict[str, dict] = defaultdict(lambda: {
+        "activeMemory": {"calls": 0, "errors": 0, "models": defaultdict(int)},
+        "session":      {"calls": 0, "errors": 0, "models": defaultdict(int)},
+        "announce":     {"calls": 0, "errors": 0, "models": defaultdict(int)},
+        "fallbacks":    0,
+    })
+
+    for line in r.stdout.splitlines():
+        m = _GATEWAY_TS_RE.search(line)
+        if not m:
+            continue
+        date = m.group(1)
+        if "model fallback decision" in line:
+            days[date]["fallbacks"] += 1
+            continue
+        if "embedded run agent end" not in line:
+            continue
+        em = _GATEWAY_RUN_RE.search(line)
+        if not em:
+            continue
+        run_id = em.group("runId")
+        is_error = em.group("isError") == "true"
+        model = em.group("model")
+        if run_id.startswith("active-memory"):
+            bucket = days[date]["activeMemory"]
+        elif run_id.startswith("announce"):
+            bucket = days[date]["announce"]
+        else:
+            bucket = days[date]["session"]
+        bucket["calls"] += 1
+        if is_error:
+            bucket["errors"] += 1
+        bucket["models"][model] += 1
+
+    out: dict[str, dict] = {}
+    for date, day in days.items():
+        entry: dict = {"fallbacks": day["fallbacks"]}
+        for src_key, profile_key in (("activeMemory", "active-memory"),
+                                      ("session", "session-embed"),
+                                      ("announce", "announce")):
+            b = day[src_key]
+            models = dict(b["models"])
+            profile = GATEWAY_CALL_PROFILE.get(profile_key, {"tokensIn": 1000, "tokensOut": 200})
+            est = 0.0
+            for model, n in models.items():
+                u = {"input": profile["tokensIn"] * n, "output": profile["tokensOut"] * n, "cacheRead": 0}
+                est += cost_for(model, u)
+            entry[src_key] = {
+                "calls": b["calls"],
+                "errors": b["errors"],
+                "models": models,
+                "estCost": round(est, 4),
+            }
+        out[date] = entry
+    return out
 
 
 def build() -> dict:
@@ -514,7 +1065,12 @@ def build() -> dict:
         s["agent"] = agent
         raw.append(s)
 
-    subs = [s for s in raw if is_substantial(s)]
+    # Keep ALL sessions in the record set — even cron-rotator / heartbeat /
+    # daily-notes that we used to drop. They still cost real money on
+    # OpenRouter, so dropping them made the local total diverge from the
+    # provider total by ~$6/day. Visibility in the UI is controlled by the
+    # `visible` and `noiseKind` flags emitted per record below.
+    subs = list(raw)
 
     # Index every parsed session (substantial or not) by sessionKey so we can
     # resolve `sessions_spawn` childSessionKeys to the actual child trajectory.
@@ -554,12 +1110,16 @@ def build() -> dict:
         return "main"
 
     def _extract_owner(sk: str) -> dict:
-        """Pull owner info from sessionKey suffix. Formats observed:
-        - agent:<a>:telegram:direct:<chatId>
-        - agent:<a>:telegram:group:<chatId>
-        - agent:<a>:cli:<...>
-        - agent:<a>:subagent:<uuid>   (owner = the parent's session)
-        - agent:<a>:cron:<id>          (owner = cron)
+        """Pull owner info from sessionKey suffix. Formats observed in the wild:
+        - agent:<a>:telegram:direct:<chatId>     → telegram DM
+        - agent:<a>:telegram:group:<chatId>      → telegram group
+        - agent:<a>:direct:<chatId>              → telegram DM (newer, no "telegram:" prefix)
+        - agent:<a>:cli:<...>                    → CLI invocation
+        - agent:<a>:main[:...]                   → local interactive shell on the host
+        - agent:<a>:dashboard:<uuid>             → web dashboard / mini-app trigger
+        - agent:<a>:subagent:<uuid>              → spawned by another session
+        - agent:<a>:cron:<id>[:run:<uuid>]       → scheduled job
+        - <uuid>                                 → legacy key, no attribution info
         """
         parts = sk.split(":")
         if len(parts) >= 5 and parts[2] == "telegram":
@@ -570,13 +1130,34 @@ def build() -> dict:
                 "ownerLabel": f"📨 {chat_id}",
                 "ownerChannel": parts[3],
             }
+        # Newer Telegram-direct format: agent:<a>:direct:<numericChatId>
+        if len(parts) >= 4 and parts[2] == "direct" and parts[3].lstrip("-").isdigit():
+            chat_id = parts[3]
+            return {
+                "ownerKey": chat_id,
+                "ownerKind": "telegram",
+                "ownerLabel": f"📨 {chat_id}",
+                "ownerChannel": "direct",
+            }
         if len(parts) >= 3 and parts[2] == "cli":
             return {"ownerKey": "cli", "ownerKind": "cli", "ownerLabel": "💻 CLI"}
         if len(parts) >= 3 and parts[2] == "cron":
             return {"ownerKey": "cron", "ownerKind": "cron", "ownerLabel": "⏰ cron"}
         if len(parts) >= 3 and parts[2] == "subagent":
             return {"ownerKey": "subagent", "ownerKind": "subagent", "ownerLabel": "↳ subagent"}
-        return {"ownerKey": "?", "ownerKind": "unknown", "ownerLabel": "?"}
+        # Local interactive shell on the host. The "main" channel suffix means
+        # whoever sits at the host's terminal — for a single-user box this is
+        # always the admin/operator.
+        if len(parts) >= 3 and parts[2] == "main":
+            return {"ownerKey": "local", "ownerKind": "local", "ownerLabel": "💻 Locale"}
+        if len(parts) >= 3 and parts[2] == "dashboard":
+            return {"ownerKey": "dashboard", "ownerKind": "dashboard", "ownerLabel": "🖥 Dashboard"}
+        # Legacy: bare UUID with no agent: prefix, or any other shape we don't
+        # recognise. Distinguish from a true unknown by labelling as "legacy"
+        # so users see it's a pre-attribution session, not a bug.
+        if sk and ":" not in sk:
+            return {"ownerKey": "legacy", "ownerKind": "legacy", "ownerLabel": "🗂 legacy"}
+        return {"ownerKey": "?", "ownerKind": "unknown", "ownerLabel": "❓ sconosciuto"}
 
     def _agent_from_session_key(sk: str) -> str | None:
         # sessionKey like agent:<owner_agent>:<scope>:<id> — parts[1] is the
@@ -602,8 +1183,13 @@ def build() -> dict:
         tin = int(u.get("input", 0) or 0)
         tout = int(u.get("output", 0) or 0)
         tcache = int(u.get("cacheRead", 0) or 0)
-        # Cost per model (handles fallback chain)
-        c = sum(cost_for(model_id, pu) for model_id, pu in (s.get("perModelUsage") or {}).items())
+        # Cost per model (handles fallback chain) — keep the per-model breakdown
+        # on the record so the UI can show the *real* model that billed tokens
+        # instead of pinning a session to the primary model from session.started.
+        breakdown, fb_cost, fb_used = model_breakdown(
+            s.get("perModelUsage") or {}, s["model"]
+        )
+        c = sum(e["cost"] for e in breakdown)
         # Date attribution: use ENDED date so a session straddling midnight
         # lands on the day where the bulk of the work actually happened
         # (matches user perception of "what I spent today").
@@ -613,11 +1199,16 @@ def build() -> dict:
             parent_key, parent_agent = _parent_for_subagent(sk)
         else:
             parent_key, parent_agent = None, None
+        noise_kind = _classify_noise(s)
+        visible = is_substantial(s)
         records.append({
             "id": os.path.basename(s["path"]).split(".")[0],
             "agent": s["agent"],
             "model": s["model"],
             "modelDisplay": MODEL_DISPLAY.get(s["model"], s["model"]),
+            "modelBreakdown": breakdown,
+            "fallbackUsed": fb_used,
+            "fallbackCost": fb_cost,
             "date": s["ended"][:10],
             "startedAt": s["started"],
             "endedAt": s["ended"],
@@ -634,6 +1225,8 @@ def build() -> dict:
             "topic": extract_topic(s),
             "sessionKey": sk,
             "kind": kind,
+            "visible": visible,
+            "noiseKind": noise_kind,
             "parentAgent": parent_agent,
             "parentSessionKey": parent_key,
             "owner": _extract_owner(sk),
@@ -646,7 +1239,7 @@ def build() -> dict:
 
     # Daily aggregation (from real records, not estimates)
     daily = defaultdict(lambda: {"sessions": 0, "tokensIn": 0, "tokensOut": 0,
-                                 "cacheRead": 0, "cost": 0.0})
+                                 "cacheRead": 0, "cost": 0.0, "fallbackCost": 0.0})
     for r in records:
         d = daily[r["date"]]
         d["sessions"] += 1
@@ -654,9 +1247,51 @@ def build() -> dict:
         d["tokensOut"] += r["tokensOut"]
         d["cacheRead"] += r["cacheRead"]
         d["cost"] += r["cost"]
+        d["fallbackCost"] += r.get("fallbackCost", 0) or 0
     daily_list = [{"date": k, **{kk: (round(vv, 4) if isinstance(vv, float) else vv)
                                   for kk, vv in v.items()}}
                   for k, v in sorted(daily.items())]
+
+    # Fallback summary: per-day breakdown of spend on models OTHER than the
+    # session's primary. This surfaces "invisible" costs like today's GLM 4.7
+    # bill from DeepSeek failing over — the session is labelled DeepSeek but
+    # the dollars went to GLM.
+    fallback_summary: dict[str, dict] = {}
+    for r in records:
+        if not r.get("fallbackUsed"):
+            continue
+        date = r["date"]
+        entry = fallback_summary.setdefault(date, {
+            "cost": 0.0,
+            "sessions": 0,
+            "byModel": {},
+            "fromPrimary": {},
+        })
+        entry["cost"] += r.get("fallbackCost", 0) or 0
+        entry["sessions"] += 1
+        primary = r.get("model") or "?"
+        entry["fromPrimary"][primary] = entry["fromPrimary"].get(primary, 0) + 1
+        for mb in r.get("modelBreakdown") or []:
+            if mb.get("isPrimary"):
+                continue
+            mid = mb["model"]
+            slot = entry["byModel"].setdefault(mid, {
+                "modelDisplay": mb["modelDisplay"],
+                "cost": 0.0,
+                "tokensIn": 0,
+                "tokensOut": 0,
+                "cacheRead": 0,
+                "sessions": 0,
+            })
+            slot["cost"] += mb["cost"]
+            slot["tokensIn"] += mb["tokensIn"]
+            slot["tokensOut"] += mb["tokensOut"]
+            slot["cacheRead"] += mb["cacheRead"]
+            slot["sessions"] += 1
+    for date, e in fallback_summary.items():
+        e["cost"] = round(e["cost"], 6)
+        for slot in e["byModel"].values():
+            slot["cost"] = round(slot["cost"], 6)
 
     # Agent breakdown (real tokens, real cost)
     agg = defaultdict(lambda: {"sessions": 0, "minutes": 0, "tokensIn": 0,
@@ -729,7 +1364,11 @@ def build() -> dict:
     # appear as two separate live cards, each with its own owner chip.
     # 4h window: long enough to span a single working session with pauses,
     # short enough to exclude yesterday's traffic.
-    LIVE_CUTOFF_MINUTES = 240
+    # A session is "live" only if it had a turn in the last LIVE_CUTOFF_MINUTES.
+    # 4 hours was way too generous — most sessions that paused that long are
+    # dormant, not running. Tightening to 10 min matches user perception of
+    # "is this conversation currently active in front of someone".
+    LIVE_CUTOFF_MINUTES = 10
     cutoff_iso = (datetime.now(timezone.utc).timestamp() - LIVE_CUTOFF_MINUTES * 60)
 
     def _ts_to_epoch(iso: str) -> float:
@@ -742,6 +1381,11 @@ def build() -> dict:
     for s in subs:
         if _session_kind(s.get("sessionKey") or "") != "main":
             continue
+        # Exclude noise: argo heartbeats, session-rotator pings etc. all use
+        # sessionKey shapes that classify as "main" but are not real
+        # conversations. is_substantial() catches them via their prompt/text.
+        if not is_substantial(s):
+            continue
         if _ts_to_epoch(s.get("ended") or "") < cutoff_iso:
             continue
         live_mains.append(s)
@@ -752,8 +1396,11 @@ def build() -> dict:
     for s in live_mains:
         agent = s["agent"]
         mins = duration_minutes(s["started"], s["ended"])
-        # Cost
-        c = sum(cost_for(m, u) for m, u in (s.get("perModelUsage") or {}).items())
+        # Per-model breakdown for the live card too — same shape as flat records
+        live_breakdown, live_fb_cost, live_fb_used = model_breakdown(
+            s.get("perModelUsage") or {}, s["model"]
+        )
+        c = sum(e["cost"] for e in live_breakdown)
         # Context window + peak single-call context (max of promptCache.lastCallUsage
         # across turns — meaningful single-API-call size, unlike per-turn cumulative).
         ctx_window = MODEL_CONTEXT.get(s["model"], 0)
@@ -823,6 +1470,9 @@ def build() -> dict:
             "owner": owner,
             "model": s["model"],
             "modelDisplay": MODEL_DISPLAY.get(s["model"], s["model"]),
+            "modelBreakdown": live_breakdown,
+            "fallbackUsed": live_fb_used,
+            "fallbackCost": live_fb_cost,
             "contextWindow": ctx_window,
             "peakSingleCall": peak_single,
             "sessionTokens": total_session,
@@ -901,10 +1551,31 @@ def build() -> dict:
         r["subagentsCost"] = round(sum(sc.get("cost", 0) or 0 for sc in sub_cards), 6)
         r["subagentsCount"] = len(sub_cards)
 
+    # Surface diagnostic info so the UI can warn when local totals drift from
+    # OpenRouter. `missingModels` lists ids that hit FALLBACK_PRICE during
+    # cost computation; `noiseSummary` quantifies hidden (system) spend.
+    noise_summary = {}
+    for r in records:
+        nk = r.get("noiseKind") or ""
+        if not nk:
+            continue
+        b = noise_summary.setdefault(nk, {"sessions": 0, "cost": 0.0})
+        b["sessions"] += 1
+        b["cost"] += r["cost"]
+    for v in noise_summary.values():
+        v["cost"] = round(v["cost"], 4)
+
+    gateway_activity = parse_gateway_journal(days_back=14)
+    error_spend = parse_error_spend(days_back=14)
+    or_activity = load_openrouter_activity()
+    reconciliation = reconcile_with_openrouter(records, or_activity, error_spend)
+
     return {
         "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "sessionsCount": len(records),
+        "sessionsVisibleCount": sum(1 for r in records if r.get("visible")),
         "totalCost": round(sum(r["cost"] for r in records), 4),
+        "totalCostVisible": round(sum(r["cost"] for r in records if r.get("visible")), 4),
         "totalTokensIn": sum(r["tokensIn"] for r in records),
         "totalTokensOut": sum(r["tokensOut"] for r in records),
         "totalCacheRead": sum(r["cacheRead"] for r in records),
@@ -914,6 +1585,14 @@ def build() -> dict:
         "bloated": bloated,
         "currentByAgent": current_by_agent,
         "pricing": MODEL_PRICING,
+        "missingModels": sorted(_MISSING_MODELS),
+        "noiseSummary": noise_summary,
+        "gatewayActivity": gateway_activity,
+        "fallbackSummary": fallback_summary,
+        "errorSpend": error_spend,
+        "openrouterActivity": or_activity.get("days", {}),
+        "openrouterFetchedAt": or_activity.get("fetchedAt", 0),
+        "reconciliation": reconciliation,
     }
 
 
