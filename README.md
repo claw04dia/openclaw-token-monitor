@@ -46,7 +46,7 @@ These cannot be automated. The end-user must do them once.
    `/newbot`, follow the prompts, and **save the token** it returns. It looks
    like `1234567890:AAEhBP...`.
 2. **Get your Telegram user ID.** Open [@userinfobot](https://t.me/userinfobot)
-   and send any message. It will reply with your numeric ID (e.g. `529895213`).
+   and send any message. It will reply with your numeric ID (a 9–10 digit number).
 
 ### Step 2 — Prerequisites on the OpenClaw
 

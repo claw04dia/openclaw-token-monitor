@@ -28,14 +28,14 @@ from pathlib import Path
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USERS = {
-    int(x) for x in os.environ.get("TELEGRAM_ALLOWED_USER", "529895213").split(",") if x.strip()
+    int(x) for x in os.environ.get("TELEGRAM_ALLOWED_USER", "").split(",") if x.strip()
 }
 # Admin users see full data; allowed-but-non-admin get viewer scope (no data).
-# Defaults to ALLOWED_USERS so existing single-user deployments stay admin.
+# Defaults to ALLOWED_USERS so single-user deployments don't need both vars set.
 ADMIN_USERS = {
     int(x) for x in os.environ.get(
         "TELEGRAM_ADMIN_USER",
-        os.environ.get("TELEGRAM_ALLOWED_USER", "529895213"),
+        os.environ.get("TELEGRAM_ALLOWED_USER", ""),
     ).split(",") if x.strip()
 }
 PORT = int(os.environ.get("PORT", "8899"))
@@ -43,7 +43,6 @@ BIND = os.environ.get("BIND", "127.0.0.1")
 MAX_AGE = int(os.environ.get("AUTH_MAX_AGE_SECONDS", "86400"))
 ALLOW_ORIGIN = os.environ.get("ALLOW_ORIGIN", "*")
 
-HISTORY_PATH = "/tmp/claw04-telegram-miniapp/history.json"
 TOKEN_USAGE_PATH = os.path.expanduser("~/.openclaw/workspace/memory/token-usage.json")
 AUTH_PROFILES_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
 CRON_JOBS_PATH = os.path.expanduser("~/.openclaw/cron/jobs.json")
@@ -541,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
         if user is None:
             log.info("auth failed from %s path=%s", self.client_address[0], self.path)
             return None
-        if ALLOWED_USERS and user.get("id") not in ALLOWED_USERS:
+        if user.get("id") not in ALLOWED_USERS:
             log.info("user %s not in allowlist", user.get("id"))
             return None
         return user

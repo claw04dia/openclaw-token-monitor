@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import urllib.request
 
 MEMORY_DIR = os.path.expanduser("~/.openclaw/workspace/memory")
-HISTORY_PATH = "/tmp/claw04-telegram-miniapp/history.json"
+HISTORY_PATH = os.path.expanduser("~/.cache/token-monitor/history.json")
 TOKEN_USAGE_PATH = os.path.expanduser("~/.openclaw/workspace/memory/token-usage.json")
 AUTH_PROFILES_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
 

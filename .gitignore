@@ -17,3 +17,7 @@ data/
 .idea/
 *.swp
 .DS_Store
+
+# Cantiere process docs (kept local, not shipped to the public repo)
+PLAN.md
+PROGRESS.md
