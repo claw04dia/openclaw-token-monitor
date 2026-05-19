@@ -106,7 +106,7 @@ After=default.target
 [Service]
 Type=simple
 EnvironmentFile=$CREDS_FILE
-Environment=TELEGRAM_ALLOWED_USER=$TELEGRAM_USER
+Environment=TELEGRAM_ADMIN_USER=$TELEGRAM_USER
 Environment=PORT=$PORT
 Environment=BIND=127.0.0.1
 Environment=ALLOW_ORIGIN=$ALLOW_ORIGIN

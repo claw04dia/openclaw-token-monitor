@@ -16,8 +16,9 @@ A user opens the bot in Telegram and taps the menu button. Telegram opens the
 GitHub-Pages frontend URL with `?api=<this-machine-funnel-url>` baked in. The
 frontend reads the `?api=` query string, then sends every request to that URL
 with `Authorization: tma <initData>`. The backend on the OpenClaw validates the
-HMAC of `initData` against `TELEGRAM_BOT_TOKEN`, checks the user ID is in
-`TELEGRAM_ALLOWED_USER`, and serves data. Each OpenClaw has its own bot, its
+HMAC of `initData` against `TELEGRAM_BOT_TOKEN`. Users in
+`TELEGRAM_ADMIN_USER` see the full admin dashboard; anyone else who can
+authenticate against this bot sees a static onboarding tutorial. Each OpenClaw has its own bot, its
 own Funnel URL, and sees only its own trajectories — no cross-tenant exposure.
 
 ```
@@ -123,12 +124,16 @@ The WebApp button URL is missing `?api=...`. Re-run `install.sh` — it will
 re-set the menu button correctly.
 
 ### 401 on `/api/data`
-Either `TELEGRAM_BOT_TOKEN` is wrong, or your Telegram ID isn't in
-`TELEGRAM_ALLOWED_USER`. Inspect:
+`TELEGRAM_BOT_TOKEN` is wrong or the initData is expired. Inspect:
 ```bash
 cat ~/.openclaw/credentials/telegram-token-monitor.env
 systemctl --user show telegram-token-monitor-api -p Environment
 ```
+
+### Tutorial shown instead of admin dashboard
+Your Telegram user ID is not in `TELEGRAM_ADMIN_USER`. Add it to the systemd
+unit's Environment line and `systemctl --user restart telegram-token-monitor-api`.
+`TELEGRAM_ALLOWED_USER` is also honoured as a fallback for backward compat.
 
 ### Tailscale: "Funnel feature not available"
 The tailnet's admin must enable Funnel:
@@ -178,7 +183,9 @@ PLAN.md / PROGRESS.md   Process docs (cantiere)
 README.md            This file
 ```
 
-The API serves four endpoints, all admin-gated by `TELEGRAM_ALLOWED_USER`:
+The API serves four endpoints. Data is admin-only (`TELEGRAM_ADMIN_USER`);
+non-admin authenticated users get `{viewer, scope: "viewer"}` so the frontend
+renders the static tutorial:
 - `GET /health` — unauthenticated liveness probe
 - `GET /api/data` — sessions, spend, OpenRouter reconciliation, agent breakdown
 - `GET /api/cron` — OpenClaw `jobs.json` agents

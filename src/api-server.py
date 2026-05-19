@@ -7,7 +7,9 @@ Tailscale Funnel; CORS is restricted to the frontend origin.
 
 Env vars:
   TELEGRAM_BOT_TOKEN    bot token used to validate initData signatures
-  TELEGRAM_ALLOWED_USER comma-separated Telegram user IDs allowed to fetch
+  TELEGRAM_ADMIN_USER   comma-separated Telegram user IDs that see the full
+                        admin dashboard (everyone else sees the tutorial).
+                        Falls back to TELEGRAM_ALLOWED_USER for backward compat.
   PORT                  listen port (default 8899)
   BIND                  listen address (default 127.0.0.1)
   AUTH_MAX_AGE_SECONDS  max age of initData auth_date (default 86400 = 24h)
@@ -27,11 +29,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ALLOWED_USERS = {
-    int(x) for x in os.environ.get("TELEGRAM_ALLOWED_USER", "").split(",") if x.strip()
-}
-# Admin users see full data; allowed-but-non-admin get viewer scope (no data).
-# Defaults to ALLOWED_USERS so single-user deployments don't need both vars set.
+# Admins see the full dashboard (costs, sessions, cron). Everyone else who
+# can authenticate against this bot sees a static onboarding tutorial — no
+# operational data is exposed. TELEGRAM_ALLOWED_USER is honoured as a
+# fallback so existing deployments keep working without re-running install.sh.
 ADMIN_USERS = {
     int(x) for x in os.environ.get(
         "TELEGRAM_ADMIN_USER",
@@ -527,9 +528,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth(self) -> dict | None:
         """Validate HMAC of Telegram initData. Returns user dict or None on
-        signature failure. The allowlist check (TELEGRAM_ALLOWED_USER) is
-        applied separately by callers so authenticated-but-unallowed users
-        can still receive a guest-scope identity payload."""
+        signature failure. Non-admins are not rejected here — they get the
+        viewer-scope tutorial response from the endpoint."""
         header = self.headers.get("Authorization", "")
         init_data = ""
         if header.startswith("tma "):
@@ -545,12 +545,6 @@ class Handler(BaseHTTPRequestHandler):
             log.info("auth failed from %s path=%s", self.client_address[0], self.path)
             return None
         return user
-
-    def _is_allowed(self, user: dict) -> bool:
-        if user.get("id") not in ALLOWED_USERS:
-            log.info("user %s not in allowlist", user.get("id"))
-            return False
-        return True
 
     def log_message(self, fmt, *args):
         log.info("%s - " + fmt, self.client_address[0], *args)
@@ -571,38 +565,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
-            if not self._is_allowed(user):
-                # Authenticated against this bot's token but not on the
-                # allowlist. Echo back just enough identity for the frontend
-                # to show "ask the operator to add this Telegram ID".
-                self._json(200, {"viewer": viewer, "scope": "guest"})
+            if not viewer["isAdmin"]:
+                # Everyone non-admin sees the static tutorial — no operational
+                # data is sent. The frontend renders TUTORIAL_CARDS locally.
+                self._json(200, {"viewer": viewer, "scope": "viewer"})
                 return
             try:
                 payload = build_payload()
             except Exception as e:
                 log.exception("payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
-                return
-            if not viewer["isAdmin"]:
-                # Strip everything except live-agent context-fill info. Viewers
-                # don't see costs, topics, prompts, replies, or historical data.
-                agents_view = []
-                for c in payload.get("currentByAgent", []) or []:
-                    agents_view.append({
-                        "agent": c.get("agent"),
-                        "modelDisplay": c.get("modelDisplay"),
-                        "contextWindow": c.get("contextWindow"),
-                        "peakSingleCall": c.get("peakSingleCall"),
-                        "sessionTokens": c.get("sessionTokens"),
-                        "started": c.get("started"),
-                        "ended": c.get("ended"),
-                    })
-                self._json(200, {
-                    "viewer": viewer,
-                    "scope": "viewer",
-                    "updatedAt": payload.get("updatedAt"),
-                    "agents": agents_view,
-                })
                 return
             payload["viewer"] = viewer
             payload["scope"] = "admin"
@@ -614,9 +586,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
-            if not self._is_allowed(user):
-                self._json(200, {"viewer": viewer, "scope": "guest"})
-                return
             if not viewer["isAdmin"]:
                 self._json(200, {"viewer": viewer, "scope": "viewer"})
                 return
@@ -635,9 +604,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
-            if not self._is_allowed(user):
-                self._json(200, {"viewer": viewer, "scope": "guest"})
-                return
             if not viewer["isAdmin"]:
                 self._json(200, {"viewer": viewer, "scope": "viewer"})
                 return
@@ -658,10 +624,9 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
     if not BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN env var required")
-    if not ALLOWED_USERS:
-        raise SystemExit("TELEGRAM_ALLOWED_USER env var required")
-    log.info("listening on %s:%d (allowed=%s, admin=%s)",
-             BIND, PORT, sorted(ALLOWED_USERS), sorted(ADMIN_USERS))
+    if not ADMIN_USERS:
+        raise SystemExit("TELEGRAM_ADMIN_USER env var required (TELEGRAM_ALLOWED_USER also honoured)")
+    log.info("listening on %s:%d (admin=%s)", BIND, PORT, sorted(ADMIN_USERS))
     # Warm caches at startup so the first request (and build-sessions.py) see
     # fresh OpenRouter activity data. Failure is non-fatal — we serve cached.
     try:
