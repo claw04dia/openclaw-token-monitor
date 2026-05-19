@@ -398,37 +398,48 @@ def parse_trajectory(path: str) -> dict | None:
                         single_call = int(lcu.get("input", 0) or 0) + int(lcu.get("cacheRead", 0) or 0)
                         if single_call > last_input_max:
                             last_input_max = single_call
-                    # Always keep the latest non-empty prompt/text for topic extraction
-                    if data.get("finalPromptText"):
-                        final_prompt = data["finalPromptText"]
+                    # Always keep the latest non-empty prompt/text for topic
+                    # extraction. The OpenClaw runtime replaces oversized
+                    # trajectory fields with a truncation-metadata dict
+                    # ({"truncated": true, ...}); guard string ops accordingly.
+                    fpt = data.get("finalPromptText")
+                    if isinstance(fpt, str) and fpt:
+                        final_prompt = fpt
                     texts = data.get("assistantTexts") or []
-                    if texts and texts[0]:
+                    if texts and isinstance(texts[0], str) and texts[0]:
                         assistant_text = texts[0]
                     # Per-turn record for the "live" view
                     if u.get("input", 0) > 0 or u.get("output", 0) > 0:
                         first_assistant = (texts or [""])[0]
+                        if not isinstance(first_assistant, str):
+                            first_assistant = ""
+                        fpt_safe = fpt if isinstance(fpt, str) else ""
                         timeline.append({
                             "ts": d.get("ts"),
                             "model": d.get("modelId") or model,
                             "tokensIn": int(u.get("input", 0) or 0),
                             "tokensOut": int(u.get("output", 0) or 0),
                             "cacheRead": int(u.get("cacheRead", 0) or 0),
-                            "promptPreview": strip_runtime_prefix(data.get("finalPromptText") or "").strip()[:400],
-                            "replyPreview": (first_assistant or "")[:400],
+                            "promptPreview": strip_runtime_prefix(fpt_safe).strip()[:400],
+                            "replyPreview": first_assistant[:400],
                         })
                 elif t == "trace.artifacts":
                     data = d.get("data", {}) or {}
-                    if not final_prompt and data.get("finalPromptText"):
-                        final_prompt = data["finalPromptText"]
+                    fpt = data.get("finalPromptText")
+                    if not final_prompt and isinstance(fpt, str) and fpt:
+                        final_prompt = fpt
                     texts = data.get("assistantTexts") or []
-                    if not assistant_text and texts and texts[0]:
+                    if not assistant_text and texts and isinstance(texts[0], str) and texts[0]:
                         assistant_text = texts[0]
                 elif t == "prompt.submitted":
-                    p = (d.get("data", {}) or {}).get("text") or ""
-                    if p:
+                    p = (d.get("data", {}) or {}).get("text")
+                    if isinstance(p, str) and p:
                         user_prompts.append(p)
                 elif t == "context.compiled" and not subagent_task:
-                    sp = (d.get("data", {}) or {}).get("systemPrompt") or ""
+                    sp = (d.get("data", {}) or {}).get("systemPrompt")
+                    if not isinstance(sp, str):
+                        # Truncation metadata dict — no marker to find here.
+                        continue
                     for marker in TASK_MARKERS:
                         idx = sp.find(marker)
                         if idx >= 0:
