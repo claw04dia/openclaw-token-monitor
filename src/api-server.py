@@ -526,6 +526,10 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _auth(self) -> dict | None:
+        """Validate HMAC of Telegram initData. Returns user dict or None on
+        signature failure. The allowlist check (TELEGRAM_ALLOWED_USER) is
+        applied separately by callers so authenticated-but-unallowed users
+        can still receive a guest-scope identity payload."""
         header = self.headers.get("Authorization", "")
         init_data = ""
         if header.startswith("tma "):
@@ -540,10 +544,13 @@ class Handler(BaseHTTPRequestHandler):
         if user is None:
             log.info("auth failed from %s path=%s", self.client_address[0], self.path)
             return None
+        return user
+
+    def _is_allowed(self, user: dict) -> bool:
         if user.get("id") not in ALLOWED_USERS:
             log.info("user %s not in allowlist", user.get("id"))
-            return None
-        return user
+            return False
+        return True
 
     def log_message(self, fmt, *args):
         log.info("%s - " + fmt, self.client_address[0], *args)
@@ -564,6 +571,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
+            if not self._is_allowed(user):
+                # Authenticated against this bot's token but not on the
+                # allowlist. Echo back just enough identity for the frontend
+                # to show "ask the operator to add this Telegram ID".
+                self._json(200, {"viewer": viewer, "scope": "guest"})
+                return
             try:
                 payload = build_payload()
             except Exception as e:
@@ -601,6 +614,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
+            if not self._is_allowed(user):
+                self._json(200, {"viewer": viewer, "scope": "guest"})
+                return
             if not viewer["isAdmin"]:
                 self._json(200, {"viewer": viewer, "scope": "viewer"})
                 return
@@ -619,6 +635,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
+            if not self._is_allowed(user):
+                self._json(200, {"viewer": viewer, "scope": "guest"})
+                return
             if not viewer["isAdmin"]:
                 self._json(200, {"viewer": viewer, "scope": "viewer"})
                 return
