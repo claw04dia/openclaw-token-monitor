@@ -321,6 +321,12 @@ def parse_trajectory(path: str) -> dict | None:
     # and merge with the matching toolResult (which holds childSessionKey/runId).
     spawn_calls: dict[str, dict] = {}
     spawn_links: list[dict] = []  # finalized {childSessionKey, runId, ts, task, model, ...}
+    # Tavily call timestamps, deduped on toolCallId. The same toolResult appears
+    # in every subsequent turn's messagesSnapshot, so we'd count it N times
+    # without dedup. We only track calls actually answered by Tavily (the
+    # provider field on the toolResult) — failed/other-provider searches don't
+    # eat the Tavily monthly quota.
+    tavily_call_ts: dict[str, str] = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -385,6 +391,23 @@ def parse_trajectory(path: str) -> dict | None:
                                 "context": call.get("context", ""),
                                 "agentIdRequested": call.get("agentId", ""),
                             })
+                        elif role == "toolResult" and msg.get("toolName") == "web_search":
+                            det = msg.get("details") or {}
+                            if det.get("provider") != "tavily":
+                                continue
+                            cid = msg.get("toolCallId") or ""
+                            if cid and cid not in tavily_call_ts:
+                                # `timestamp` on the message is sometimes ISO,
+                                # sometimes epoch-ms (depends on runtime version).
+                                # Coerce to ISO so the calendar-month filter works.
+                                raw_ts = msg.get("timestamp")
+                                if isinstance(raw_ts, (int, float)):
+                                    iso = datetime.fromtimestamp(raw_ts / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                                elif isinstance(raw_ts, str) and raw_ts:
+                                    iso = raw_ts
+                                else:
+                                    iso = ts or ""
+                                tavily_call_ts[cid] = iso
                     if u.get("input", 0) > 0 or u.get("output", 0) > 0:
                         m = d.get("modelId") or model or "unknown"
                         agg = per_model_usage.setdefault(m, {"input": 0, "output": 0, "cacheRead": 0})
@@ -483,6 +506,9 @@ def parse_trajectory(path: str) -> dict | None:
         # Merge trajectory-derived links with raw-jsonl ones (the latter catches
         # spawns that fell off the truncated messagesSnapshot in long sessions).
         "spawnLinks": _merge_spawn_links(spawn_links, parse_raw_spawn_events(path)),
+        # Tavily call timestamps (one per unique toolCallId). Aggregated by
+        # calendar month in build() to surface monthly-quota consumption.
+        "tavilyCallTs": sorted(tavily_call_ts.values()),
     }
 
 
@@ -1581,6 +1607,22 @@ def build() -> dict:
     or_activity = load_openrouter_activity()
     reconciliation = reconcile_with_openrouter(records, or_activity, error_spend)
 
+    # Tavily monthly-quota consumption. Free dev tier = 1000 searches/month.
+    # We attribute each call to the calendar month of its own toolResult
+    # timestamp (NOT the session's date) so a session straddling month-end
+    # bills calls to the right month.
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    tavily_calls_this_month = 0
+    for s in raw:
+        for ts in (s.get("tavilyCallTs") or []):
+            if isinstance(ts, str) and ts[:7] == current_month:
+                tavily_calls_this_month += 1
+    tavily_month = {
+        "month": current_month,
+        "calls": tavily_calls_this_month,
+        "quota": 1000,
+    }
+
     return {
         "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "sessionsCount": len(records),
@@ -1604,6 +1646,7 @@ def build() -> dict:
         "openrouterActivity": or_activity.get("days", {}),
         "openrouterFetchedAt": or_activity.get("fetchedAt", 0),
         "reconciliation": reconciliation,
+        "tavilyMonth": tavily_month,
     }
 
 

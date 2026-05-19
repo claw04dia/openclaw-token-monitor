@@ -337,6 +337,7 @@ def build_payload() -> dict:
         data["reconciliation"] = sess.get("reconciliation", {})
         data["errorSpend"] = sess.get("errorSpend", {})
         data["gatewayActivity"] = sess.get("gatewayActivity", {})
+        data["tavilyMonth"] = sess.get("tavilyMonth", {})
         data["stats"] = {
             "totalSessions": sess.get("sessionsCount", 0),
             "totalTokensIn": sess.get("totalTokensIn", 0),
