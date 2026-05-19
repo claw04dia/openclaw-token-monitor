@@ -564,14 +564,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             viewer = self._viewer(user)
-            if not viewer["isAdmin"]:
-                self._json(200, {"viewer": viewer, "scope": "viewer"})
-                return
             try:
                 payload = build_payload()
             except Exception as e:
                 log.exception("payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
+                return
+            if not viewer["isAdmin"]:
+                # Strip everything except live-agent context-fill info. Viewers
+                # don't see costs, topics, prompts, replies, or historical data.
+                agents_view = []
+                for c in payload.get("currentByAgent", []) or []:
+                    agents_view.append({
+                        "agent": c.get("agent"),
+                        "modelDisplay": c.get("modelDisplay"),
+                        "contextWindow": c.get("contextWindow"),
+                        "peakSingleCall": c.get("peakSingleCall"),
+                        "sessionTokens": c.get("sessionTokens"),
+                        "started": c.get("started"),
+                        "ended": c.get("ended"),
+                    })
+                self._json(200, {
+                    "viewer": viewer,
+                    "scope": "viewer",
+                    "updatedAt": payload.get("updatedAt"),
+                    "agents": agents_view,
+                })
                 return
             payload["viewer"] = viewer
             payload["scope"] = "admin"
