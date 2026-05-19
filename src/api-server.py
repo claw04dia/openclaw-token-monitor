@@ -58,6 +58,76 @@ _OR_CACHE = {"data": None, "ts": 0}
 _OR_TTL = 60  # seconds
 _ACTIVITY_CACHE = {"data": None, "ts": 0}
 _ACTIVITY_TTL = 300  # 5 min — OpenRouter activity rolls forward slowly
+_TAVILY_CACHE = {"data": None, "ts": 0}
+_TAVILY_TTL = 60   # match OpenRouter cadence — Tavily updates fast enough
+
+API_TOKENS_PATH = os.path.expanduser("~/.openclaw/credentials/api-tokens.env")
+
+
+def _read_tavily_key() -> str:
+    """Pulled from the gateway's credentials env file (mode 600).
+    Not in the systemd unit's Environment= because this service doesn't load
+    api-tokens.env — only telegram-token-monitor.env."""
+    try:
+        with open(API_TOKENS_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("TAVILY_API_KEY="):
+                    return line.split("=", 1)[1].strip()
+    except Exception as e:
+        log.warning("tavily key unreadable: %s", e)
+    return ""
+
+
+def fetch_tavily_usage() -> dict:
+    """Pull live quota consumption from Tavily's /usage endpoint.
+
+    Tavily charges per-credit (basic search = 1, advanced = 2, extract = 1, …)
+    and surfaces the running total against the plan's monthly allowance. This
+    is authoritative — the trajectory-based count missed calls made by gateway
+    plugins (active-memory hook, skills, retries) that don't write a
+    `web_search` toolResult.
+
+    Returns the same shape the frontend expects ({month, calls, quota, …}),
+    plus a richer breakdown for surfacing search vs extract vs crawl.
+    """
+    if _TAVILY_CACHE["data"] and (time.time() - _TAVILY_CACHE["ts"]) < _TAVILY_TTL:
+        return _TAVILY_CACHE["data"]
+    key = _read_tavily_key()
+    if not key:
+        return {"error": "no_key"}
+    try:
+        req = urllib.request.Request(
+            "https://api.tavily.com/usage",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = json.loads(r.read())
+    except Exception as e:
+        log.warning("tavily /usage failed: %s", e)
+        return {"error": str(e)}
+    acc = body.get("account") or {}
+    out = {
+        "calls":    int(acc.get("plan_usage", 0) or 0),
+        "quota":    acc.get("plan_limit"),
+        "plan":     acc.get("current_plan") or "",
+        "searches": int(acc.get("search_usage", 0) or 0),
+        "extracts": int(acc.get("extract_usage", 0) or 0),
+        "crawls":   int(acc.get("crawl_usage", 0) or 0),
+        "maps":     int(acc.get("map_usage", 0) or 0),
+        "research": int(acc.get("research_usage", 0) or 0),
+        # Frontend still labels the card with `month` — keep populating it as
+        # the current calendar month so the existing copy reads naturally.
+        # Tavily's plan_usage is for the billing period (not necessarily a
+        # calendar month) so this is cosmetic; the real numbers come from acc.
+        "month":    time.strftime("%Y-%m", time.gmtime()),
+        "fetchedAt": int(time.time()),
+    }
+    _TAVILY_CACHE["data"] = out
+    _TAVILY_CACHE["ts"] = time.time()
+    return out
 
 
 def _read_openrouter_key() -> str:
@@ -337,7 +407,6 @@ def build_payload() -> dict:
         data["reconciliation"] = sess.get("reconciliation", {})
         data["errorSpend"] = sess.get("errorSpend", {})
         data["gatewayActivity"] = sess.get("gatewayActivity", {})
-        data["tavilyMonth"] = sess.get("tavilyMonth", {})
         data["stats"] = {
             "totalSessions": sess.get("sessionsCount", 0),
             "totalTokensIn": sess.get("totalTokensIn", 0),
@@ -357,6 +426,13 @@ def build_payload() -> dict:
         with open(TOKEN_USAGE_PATH) as f:
             usage = json.load(f)
         data["stats"]["dailyBudgetUsd"] = usage.get("dailyBudgetUsd", 1.0)
+
+    # Real Tavily quota consumption (cached 60s). Authoritative — supersedes
+    # the trajectory-based count in sessions.json which only sees calls that
+    # appear as `web_search` toolResults (misses plugin/skill/retry traffic).
+    tavily = fetch_tavily_usage()
+    if "error" not in tavily:
+        data["tavilyMonth"] = tavily
 
     # Real spend from OpenRouter (cached 60s)
     real = fetch_openrouter_spend()
