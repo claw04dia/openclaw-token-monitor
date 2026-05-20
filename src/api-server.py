@@ -25,8 +25,11 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+import live_agents
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # Admins see the full dashboard (costs, sessions, cron). Everyone else who
@@ -673,6 +676,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, payload)
             except Exception as e:
                 log.exception("cron payload build failed")
+                self._json(500, {"error": "internal", "detail": str(e)})
+            return
+        if path == "/api/live-agents":
+            user = self._auth()
+            if not user:
+                self._json(401, {"error": "unauthorized"})
+                return
+            viewer = self._viewer(user)
+            if not viewer["isAdmin"]:
+                self._json(200, {"viewer": viewer, "scope": "viewer"})
+                return
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            include_ended = int((q.get("includeEnded", ["0"]) or ["0"])[0])
+            detail_flag = (q.get("detail", ["0"]) or ["0"])[0] in ("1", "true", "yes")
+            run_id = (q.get("runId", [""]) or [""])[0] or None
+            try:
+                snap = live_agents.snapshot(
+                    include_ended=include_ended,
+                    detail=detail_flag,
+                    only_run_id=run_id,
+                )
+                self._json(200, {
+                    "viewer": viewer,
+                    "scope": "admin",
+                    "fetchedAt": int(time.time()),
+                    "agents": [asdict(s) for s in snap],
+                })
+            except Exception as e:
+                log.exception("live-agents payload build failed")
                 self._json(500, {"error": "internal", "detail": str(e)})
             return
         if path == "/api/system-cron":
